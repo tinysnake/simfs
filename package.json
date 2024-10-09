@@ -1,0 +1,12 @@
+{
+	"name": "vip.tffis.code.simfs",
+	"displayName": "SimFS",
+	"version": "0.1.0",
+	"unity": "2022.4",
+	"description": "A Simulated Virtual File System written in C#. it's born for storing a large amount of small files.",
+	"keywords": [
+		"FileSystem"
+	],
+	"license": "MIT",
+	"dependencies": {}
+}
