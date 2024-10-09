@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
 
@@ -11,7 +10,13 @@ namespace SimFS
     {
         public Filebase(string filebasePath, ushort blockSize = 1024, byte attributeSize = 0, ushort bufferSize = 8196)
         {
-            _fsMan = new FSMan(filebasePath, blockSize, attributeSize, bufferSize);
+            var fs = File.Open(filebasePath, FileMode.OpenOrCreate);
+            _fsMan = new FSMan(fs, blockSize, attributeSize, bufferSize);
+        }
+
+        public Filebase(Stream stream, ushort blockSize = 1024, byte attributeSize = 0, ushort bufferSize = 8196)
+        {
+            _fsMan = new FSMan(stream, blockSize, attributeSize, bufferSize);
         }
 
         private readonly FSMan _fsMan;

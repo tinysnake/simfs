@@ -26,13 +26,7 @@ namespace SimFS
             public readonly Memory<byte> bytes;
         }
 
-        public WriteBuffer(FileStream fs, ReadWriteLock rwLock)
-            : this(4096, fs, rwLock)
-        {
-
-        }
-
-        public WriteBuffer(int bufferSize, FileStream fs, ReadWriteLock rwLock)
+        public WriteBuffer(int bufferSize, Stream fs, ReadWriteLock rwLock)
         {
             if (bufferSize < 1024)
                 throw new ArgumentOutOfRangeException(nameof(bufferSize) + " must greater than 1024");
@@ -42,7 +36,7 @@ namespace SimFS
         }
 
         private readonly Memory<byte> _buffer;
-        private readonly FileStream _fs;
+        private readonly Stream _fs;
         private readonly ReadWriteLock _rwLock;
 
         private readonly SortedList<Section> _sections = new(SectionComparer.Default);

@@ -41,20 +41,19 @@ namespace SimFS
 
         public Pooling Pooling { get; private set; }
 
-        public FSMan(string fsFilePath, ushort blockSize, byte attributeSize, ushort bufferSize)
+        public FSMan(Stream stream, ushort blockSize, byte attributeSize, ushort bufferSize)
         {
-            if (string.IsNullOrEmpty(fsFilePath))
-                throw new ArgumentNullException(nameof(fsFilePath));
-            var fileExists = File.Exists(fsFilePath);
+            if (!stream.CanSeek || !stream.CanRead || !stream.CanWrite)
+                throw new ArgumentException("stream is not valid");
+            _fs = stream;
             _rwLock = new ReadWriteLock();
-            _fs = File.Open(fsFilePath, FileMode.OpenOrCreate);
             _loadedBlockGroups = new Dictionary<int, BlockGroup>();
             _cachedBlockGroupHeads = new List<BlockGroupHead>();
             _openedFiles = new HashSet<int>();
             Pooling = new Pooling();
             try
             {
-                if (!fileExists)
+                if (stream.Length == 0)
                 {
                     var headData = new FSHeadData(blockSize, attributeSize);
                     _head = SetupFileSystem(headData, bufferSize);
@@ -83,6 +82,7 @@ namespace SimFS
                 dir.LoadInfo(this, null, inodeInfo, bg, SimDirectory.ROOT_DIR_NAME.AsMemory());
                 return dir;
             }
+
         }
 
         public FSHead Head => _head;

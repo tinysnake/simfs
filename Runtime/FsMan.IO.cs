@@ -13,7 +13,7 @@ namespace SimFS
         private byte[] _inodeBitmapBuffer;
         private byte[] _blockBitmapBuffer;
         private InodeData[] _inodeTableBuffer;
-        private readonly FileStream _fs;
+        private readonly Stream _fs;
         private WriteBuffer _writeBuffer;
         private byte _inodeSize;
         private ReadWriteLock _rwLock;
