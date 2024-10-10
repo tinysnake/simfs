@@ -7,6 +7,10 @@
 	"keywords": [
 		"FileSystem"
 	],
+	"author": {
+		"name": "Fifan Tang",
+		"email": "tff.assist@live.com"
+	},
 	"license": "MIT",
 	"dependencies": {}
 }
