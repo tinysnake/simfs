@@ -139,7 +139,7 @@ namespace SimFS
 
             var totalDataSize = buffer.Length + _localByteIndex + _localBlockIndex;
             var totalBlockLength = (totalDataSize + _blockSize - 1) / _blockSize;
-            if (totalBlockLength > _blockPointers.Length * 255)
+            if (totalBlockLength > _blockPointers.Length * byte.MaxValue)
                 throw new SimFSException(ExceptionType.FileTooLarge);
 
             var writeBuffer = _fsMan.WriteBuffer;
@@ -162,6 +162,8 @@ namespace SimFS
         private void Goto(long position)
         {
             ThrowsIfNotValid();
+            if (position > _length)
+                SetLength(position);
             (_localBlockIndex, _localByteIndex) = GetLocation(position);
         }
 
@@ -223,9 +225,30 @@ namespace SimFS
         public override void SetLength(long value)
         {
             ThrowsIfNotValid();
-            if (value > int.MaxValue || value < 0)
+            if (value < 0)
                 throw new ArgumentOutOfRangeException(nameof(value));
-            _length = (int)value;
+            if (value > _blockPointers.Length * byte.MaxValue * _blockSize)
+                throw new SimFSException(ExceptionType.FileTooLarge);
+            var oldLength = _length;
+            var newLength = (int)value;
+            if (newLength > oldLength)
+            {
+                var lengthChange = newLength - oldLength;
+                var maxBufferSize = Math.Min(lengthChange, _fsMan.WriteBuffer.Size);
+                using var _ = _fsMan.Pooling.RentBuffer(out var buffer, maxBufferSize);
+                buffer = buffer[..maxBufferSize];
+                buffer.Clear();
+                var bytesWritten = 0;
+                while (bytesWritten < lengthChange)
+                {
+                    var bytesToWrite = lengthChange - bytesWritten;
+                    bytesToWrite = Math.Min(bytesToWrite, maxBufferSize);
+                    Write(buffer[..bytesToWrite]);
+                    bytesWritten += bytesToWrite;
+                }
+            }
+            else
+                _length = newLength;
         }
 
 
