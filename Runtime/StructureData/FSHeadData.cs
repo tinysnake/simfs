@@ -13,7 +13,7 @@ namespace SimFS
         public const int MIN_POINTERS_COUNT = 3;
         public const int MAX_POINTERS_COUNT = 7;
         public const ushort MIN_BLOCK_SIZE = 128;
-        public const ushort MAX_BLOCK_SIZE = 1024;
+        public const ushort MAX_BLOCK_SIZE = 4096;
         public static readonly int MemSize = Marshal.SizeOf<FSHeadData>();
         public static readonly byte[] SIGNATURE = Encoding.UTF8.GetBytes("SMFS");
 

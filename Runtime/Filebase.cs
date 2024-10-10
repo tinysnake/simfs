@@ -9,7 +9,7 @@ namespace SimFS
 {
     public class Filebase : IDisposable
     {
-        public Filebase(string filebasePath, ushort blockSize = 512, byte attributeSize = 0, ushort bufferSize = 4096)
+        public Filebase(string filebasePath, ushort blockSize = 1024, byte attributeSize = 0, ushort bufferSize = 8196)
         {
             _fsMan = new FSMan(filebasePath, blockSize, attributeSize, bufferSize);
         }
