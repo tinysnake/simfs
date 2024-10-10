@@ -77,6 +77,11 @@ namespace SimFS
                 ThrowsIfNameIsInvalid(name.Span);
             inode.ThrowsIfNotValid();
 
+            var comparer = fsMan.Customizer.NameComparer;
+            _loadedDirectories ??= new Dictionary<ReadOnlyMemory<char>, SimDirectory>(comparer);
+            _files ??= new Dictionary<ReadOnlyMemory<char>, int>(comparer);
+            _dirs ??= new Dictionary<ReadOnlyMemory<char>, int>(comparer);
+
             _fsMan = fsMan;
             Parent = parent;
             Name = name;
@@ -84,7 +89,7 @@ namespace SimFS
             _stream = _fsMan.Pooling.FileStreamPool.Get();
             _stream.LoadFileStream(fsMan, inode, bg);
             _fsMan.loadedDirectories++;
-            if (_fsMan.loadedDirectories > _fsMan.MaxCachedDirectories)
+            if (_fsMan.loadedDirectories > _fsMan.Customizer.MaxCachedDirectoires)
                 TrimLoadedDirectories();
             _disposed = false;
         }
@@ -96,13 +101,12 @@ namespace SimFS
         private bool _initialized;
         private bool _disposed;
 
-        private readonly Dictionary<ReadOnlyMemory<char>, SimDirectory> _loadedDirectories = new(NameComparer.Ordinal);
+        private Dictionary<ReadOnlyMemory<char>, SimDirectory> _loadedDirectories = new(NameComparer.Ordinal);
+        private Dictionary<ReadOnlyMemory<char>, int> _files = new(NameComparer.Ordinal);
+        private Dictionary<ReadOnlyMemory<char>, int> _dirs = new(NameComparer.Ordinal);
         private readonly List<DirectoryEntryData> _entries = new();
         private readonly List<ReadOnlyMemory<char>> _names = new();
-        private readonly Dictionary<ReadOnlyMemory<char>, int> _files = new(NameComparer.Ordinal);
-        private readonly Dictionary<ReadOnlyMemory<char>, int> _dirs = new(NameComparer.Ordinal);
         private readonly SortedList<(int nameLength, List<int> indices)> _unusedEntries = new(UnusedEntryComparer.Default);
-        //private readonly HashSet<int> _dirtyEntries = new();
         private readonly RangeList _dirtyEntries = new();
 
         public ReadOnlyMemory<char> Name { get; private set; }
@@ -863,7 +867,7 @@ namespace SimFS
         {
             // this is my self made "algorithm" of trimming the directories, probably performs badly,
             // but "should" smarter than just trimming from the top
-            var targetTrimNum = _fsMan.MaxCachedDirectories / 10;
+            var targetTrimNum = _fsMan.Customizer.MaxCachedDirectoires / 10;
             var trimCount = 0;
             // first find out current dir chain
             _trimTempList.Clear();

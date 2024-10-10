@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 
 namespace SimFS
@@ -133,7 +132,6 @@ namespace SimFS
         private InodeData[] _inodeTable;
         private FSMan _fsMan;
         private bool _dirty;
-        //private readonly HashSet<int> _dirtyInodes = new();
         private readonly RangeList _dirtyInodes = new();
 
         public BlockGroupHead Head => new((ushort)BlockBitmap.FreeBits, (ushort)InodeBitmap.FreeBits);
@@ -159,7 +157,6 @@ namespace SimFS
                 throw new SimFSException(ExceptionType.NotEnoughBits, "not enough space to allocate inode");
             var inodeIndex = InodeBitmap.Allocate(1);
             var globalIndex = FSMan.GetGlobalIndex(GroupIndex, inodeIndex, _blockSize);
-            //UnityEngine.Debug.Log($"allocating inode: {GroupIndex}, {inodeIndex}, {globalIndex}");
             var oldInodeData = _inodeTable[inodeIndex];
             InodeData inodeData;
             oldInodeData.ThrowsIfNotEmpty(globalIndex);
@@ -198,7 +195,6 @@ namespace SimFS
         {
             var inodeData = _inodeTable[localIndex];
             inodeData.ThrowsIfNotValid(GroupIndex, localIndex, _blockSize);
-            //UnityEngine.Debug.Log($"freeing inode: {GroupIndex}, {localIndex}, {FSMan.GetGlobalIndex(GroupIndex, localIndex, _blockSize)}");
             foreach (var bpd in inodeData.blockPointers)
             {
                 if (!bpd.IsEmpty)

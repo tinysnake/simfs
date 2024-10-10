@@ -34,14 +34,12 @@ namespace SimFS
         private readonly HashSet<int> _openedFiles;
         private int _cachedBlockGroupFirstIndex;
 
-        private int _maxCachedGroupHeadCount = 12800;
-        private int _maxCachedDirectories = 1000;
-
         internal int loadedDirectories = 0;
 
-        public Pooling Pooling { get; private set; }
+        internal Pooling Pooling { get; private set; }
+        internal Customizer Customizer { get; private set; }
 
-        public FSMan(Stream stream, ushort blockSize, byte attributeSize, ushort bufferSize)
+        public FSMan(Stream stream, ushort blockSize, byte attributeSize, Customizer customizer = null)
         {
             if (!stream.CanSeek || !stream.CanRead || !stream.CanWrite)
                 throw new ArgumentException("stream is not valid");
@@ -50,13 +48,15 @@ namespace SimFS
             _loadedBlockGroups = new Dictionary<int, BlockGroup>();
             _cachedBlockGroupHeads = new List<BlockGroupHead>();
             _openedFiles = new HashSet<int>();
-            Pooling = new Pooling();
+            Customizer = customizer ?? new Customizer();
+            Pooling = new Pooling(Customizer.BufferSize);
+            Pooling.MaxBufferSize = Customizer.BufferSize;
             try
             {
                 if (stream.Length == 0)
                 {
                     var headData = new FSHeadData(blockSize, attributeSize);
-                    _head = SetupFileSystem(headData, bufferSize);
+                    _head = SetupFileSystem(headData, blockSize * 8);
                     var bg0 = AllocateBlockGroup();
                     var rootDirInode = AllocateInode(InodeUsage.Directory, out _, 4);
                     _rootDirectory = LoadDirectory(rootDirInode, bg0);
@@ -87,28 +87,6 @@ namespace SimFS
 
         public FSHead Head => _head;
         public SimDirectory RootDirectory => _rootDirectory;
-
-        public int MaxCachedGroupHeadCount
-        {
-            get => _maxCachedGroupHeadCount;
-            set
-            {
-                if (value < 100)
-                    value = 100;
-                _maxCachedGroupHeadCount = value;
-            }
-        }
-
-        public int MaxCachedDirectories
-        {
-            get => _maxCachedDirectories;
-            set
-            {
-                if (value < 100)
-                    value = 100;
-                _maxCachedDirectories = value;
-            }
-        }
 
         public BlockGroup GetBlockGroup(int groupIndex)
         {
@@ -156,13 +134,13 @@ namespace SimFS
                 return bg.Head;
 
             WriteBuffer.Flush();
-            if (groupIndex < _cachedBlockGroupFirstIndex || groupIndex >= _cachedBlockGroupFirstIndex + _maxCachedGroupHeadCount)
+            if (groupIndex < _cachedBlockGroupFirstIndex || groupIndex >= _cachedBlockGroupFirstIndex + Customizer.MaxCachedBlockGroupHead)
             {
                 TryMoveCacheBlockGroupHeadIndex(groupIndex);
             }
 
             var headIndex = groupIndex - _cachedBlockGroupFirstIndex;
-            if (headIndex < 0 || headIndex >= _maxCachedGroupHeadCount)
+            if (headIndex < 0 || headIndex >= Customizer.MaxCachedBlockGroupHead)
                 throw new IndexOutOfRangeException(nameof(headIndex));
 
             if (headIndex >= _cachedBlockGroupHeads.Count)
@@ -181,7 +159,7 @@ namespace SimFS
         {
             var curStep = groupIndex / BG_HEAD_CACHE_STEP;
             var stepLow = _cachedBlockGroupFirstIndex / BG_HEAD_CACHE_STEP;
-            var stepHigh = stepLow + _maxCachedGroupHeadCount / BG_HEAD_CACHE_STEP;
+            var stepHigh = stepLow + Customizer.MaxCachedBlockGroupHead / BG_HEAD_CACHE_STEP;
             var stepMax = _head.BlockGroupCount / BG_HEAD_CACHE_STEP;
             var stepChange = 0;
             var dir = 0;

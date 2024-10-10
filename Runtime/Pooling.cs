@@ -10,14 +10,14 @@ namespace SimFS
         private const int MIN_CACHE_BLOCK_SIZE = 100;
         private const int MIN_BUFFER_SIZE = 1024;
 
-        public Pooling()
+        public Pooling(int blockSize)
         {
-            IntListPool = new CrudeObjectPool<List<int>>(() => new List<int>(), onReturn: x => x.Clear(), maxCapacity: 1000);
+            IntListPool = new CrudeObjectPool<List<int>>(() => new List<int>(), onReturn: x => x.Clear(), maxCapacity: blockSize * 8);
             BlockGroupPool = new CrudeObjectPool<BlockGroup>(() => new BlockGroup(), onReturn: x => x.InPool(), maxCapacity: MIN_CACHE_BLOCK_SIZE);
             FileStreamPool = new CrudeObjectPool<SimFileStream>(() => new SimFileStream(), onReturn: x => x.InPool(), maxCapacity: MIN_CACHE_FILE_SIZE);
             DirectoryPool = new CrudeObjectPool<SimDirectory>(() => new SimDirectory(), onReturn: x => x.InPool(), maxCapacity: MIN_CACHE_FILE_SIZE);
-            BlockPointersPool = new CrudeObjectPool<BlockPointerData[]>(() => new BlockPointerData[BlockPointersCount], onReturn: InodeData.OnBlockPointerInPool, maxCapacity: 1000);
-            AttributesPool = new CrudeObjectPool<byte[]>(() => new byte[AttributeSize], onReturn: InodeData.OnAttributesInPool, maxCapacity: 1000);
+            BlockPointersPool = new CrudeObjectPool<BlockPointerData[]>(() => new BlockPointerData[BlockPointersCount], onReturn: InodeData.OnBlockPointerInPool, maxCapacity: blockSize * FSHeadData.GetPointersSize((uint)blockSize));
+            AttributesPool = new CrudeObjectPool<byte[]>(() => new byte[AttributeSize], onReturn: InodeData.OnAttributesInPool, maxCapacity: blockSize * 8);
         }
 
         private int _maxBufferSize = MIN_BUFFER_SIZE;
@@ -30,21 +30,6 @@ namespace SimFS
                     value = MIN_BUFFER_SIZE;
                 _maxBufferSize = value;
             }
-        }
-
-        public void SetBlockPoolSize(int size)
-        {
-            if (size < MIN_CACHE_BLOCK_SIZE)
-                size = MIN_CACHE_BLOCK_SIZE;
-            BlockGroupPool.MaxCapacity = size;
-        }
-
-        public void SetFilePoolSize(int size)
-        {
-            if (size < MIN_CACHE_FILE_SIZE)
-                size = MIN_CACHE_FILE_SIZE;
-            FileStreamPool.MaxCapacity = size;
-            DirectoryPool.MaxCapacity = size;
         }
 
         internal int BlockPointersCount { get; set; }

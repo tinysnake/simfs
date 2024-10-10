@@ -8,20 +8,18 @@ namespace SimFS
 {
     public class Filebase : IDisposable
     {
-        public Filebase(string filebasePath, ushort blockSize = 1024, byte attributeSize = 0, ushort bufferSize = 8196)
+        public Filebase(string filebasePath, ushort blockSize = 1024, byte attributeSize = 0, Customizer customizer = null)
         {
             var fs = File.Open(filebasePath, FileMode.OpenOrCreate);
-            _fsMan = new FSMan(fs, blockSize, attributeSize, bufferSize);
+            _fsMan = new FSMan(fs, blockSize, attributeSize, customizer);
         }
 
-        public Filebase(Stream stream, ushort blockSize = 1024, byte attributeSize = 0, ushort bufferSize = 8196)
+        public Filebase(Stream stream, ushort blockSize = 1024, byte attributeSize = 0, Customizer customizer = null)
         {
-            _fsMan = new FSMan(stream, blockSize, attributeSize, bufferSize);
+            _fsMan = new FSMan(stream, blockSize, attributeSize, customizer);
         }
 
         private readonly FSMan _fsMan;
-
-        public Pooling Pooling => _fsMan.Pooling;
 
         private void CheckPath(ref ReadOnlySpan<char> path)
         {
