@@ -104,11 +104,76 @@ fs.ReadAttribute(buffer);
 
 # Performance
 
-此处放上2个性能测试，1是在Windows机器上使用BenchmarkDotNet运行的相对严谨的测试，2是在Unity-IL2CPP在移动设备上进行的不严谨测试。
+这是在Windows机器上使用BenchmarkDotNet在net8.0的环境下运行的相对严谨的测试：
+
+```
+// * Summary *
+
+BenchmarkDotNet v0.14.0, Windows 11 (10.0.22631.4317/23H2/2023Update/SunValley3)
+12th Gen Intel Core i7-12700, 1 CPU, 20 logical and 12 physical cores
+.NET SDK 8.0.403
+  [Host]     : .NET 8.0.10 (8.0.1024.46610), X64 RyuJIT AVX2 [AttachedDebugger]
+  DefaultJob : .NET 8.0.10 (8.0.1024.46610), X64 RyuJIT AVX2
+```
+
+| Method     | tester           | Mean           | Error         | StdDev        | Gen0   | Allocated |
+|----------- |----------------- |---------------:|--------------:|--------------:|-------:|----------:|
+| RenameData | HostFSTest       |             NA |            NA |            NA |     NA |        NA |
+| RenameData | GameFramworkTest |     1,157.3 ns |       8.37 ns |       7.83 ns |      - |         - |
+| RenameData | SimFSTest        |    12,321.9 ns |     112.23 ns |     104.98 ns |      - |         - |
+| FillData   | HostFSTest       | 9,659,176.5 ns | 273,644.56 ns | 806,847.22 ns |      - |   36810 B |
+| FillData   | GameFramworkTest |   432,373.4 ns |   5,458.10 ns |   5,105.51 ns | 0.4883 |   11726 B |
+| FillData   | SimFSTest        |   184,853.6 ns |     826.91 ns |     733.03 ns |      - |         - |
+| ReadData   | HostFSTest       | 1,288,943.2 ns |   8,672.89 ns |   7,688.29 ns | 5.8594 |   83203 B |
+| ReadData   | GameFramworkTest |    97,419.0 ns |     463.14 ns |     410.56 ns |      - |         - |
+| ReadData   | SimFSTest        |   132,595.6 ns |     586.29 ns |     519.73 ns |      - |         - |
+| DeleteData | HostFSTest       |   231,807.6 ns |     943.01 ns |     882.10 ns | 2.1973 |   29600 B |
+| DeleteData | GameFramworkTest |       587.9 ns |       3.55 ns |       3.15 ns |      - |         - |
+| DeleteData | SimFSTest        |     4,849.4 ns |      42.58 ns |      37.74 ns |      - |         - |
+
+此外，我使用Unity引擎在不同的移动设备上进行也进行了不严谨的测试：
+
+Environment: Unity 2022.4.33f1 - Release
+ScriptBackend: IL2CPP
+
+Test Device: XiaoMi MI5
+
+| Method               | tester           | Mean           |
+|--------------------- |----------------- |---------------:|
+| FillData-FirstTime   | HostFSTest       |          92 ms |
+| FillData-FirstTime   | GameFramworkTest |         304 ms |
+| FillData-FirstTime   | SimFSTest        |         216 ms |
+| FillData             | HostFSTest       |          65 ms |
+| FillData             | GameFramworkTest |          26 ms |
+| FillData             | SimFSTest        |           7 ms |
+| ReadData             | HostFSTest       |          59 ms |
+| ReadData             | GameFramworkTest |          24 ms |
+| ReadData             | SimFSTest        |          34 ms |
+| DeleteData           | HostFSTest       |          24 ms |
+| DeleteData           | GameFramworkTest |          15 ms |
+| DeleteData           | SimFSTest        |           2 ms |
+
+
+Test Device: Google Pixel 5
+
+| Method               | tester           | Mean           |
+|--------------------- |----------------- |---------------:|
+| FillData-FirstTime   | HostFSTest       |          27 ms |
+| FillData-FirstTime   | GameFramworkTest |         127 ms |
+| FillData-FirstTime   | SimFSTest        |          88 ms |
+| FillData             | HostFSTest       |          20 ms |
+| FillData             | GameFramworkTest |           7 ms |
+| FillData             | SimFSTest        |           2 ms |
+| ReadData             | HostFSTest       |          17 ms |
+| ReadData             | GameFramworkTest |           1 ms |
+| ReadData             | SimFSTest        |           2 ms |
+| DeleteData           | HostFSTest       |           8 ms |
+| DeleteData           | GameFramworkTest |           5 ms |
+| DeleteData           | SimFSTest        |           1 ms |
 
 # DataStructure
 
-可以移步至专属章节：[DataStructure](./DataStructure.md)
+可以移步至专属章节：[DataStructure](DataStructure.md)
 
 # What's more
 

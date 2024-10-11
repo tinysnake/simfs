@@ -100,7 +100,11 @@ namespace SimFS
             return Read(buffer.AsSpan(offset, count));
         }
 
+#if NETSTANDARD2_0 || NETFRAMEWORK
+        public int Read(Span<byte> buffer)
+#else
         public override int Read(Span<byte> buffer)
+#endif
         {
             if (buffer.IsEmpty)
                 throw new ArgumentNullException(nameof(buffer));
@@ -131,7 +135,11 @@ namespace SimFS
             Write(buffer.AsSpan(offset, count));
         }
 
+#if NETSTANDARD2_0 || NETFRAMEWORK
+        public void Write(ReadOnlySpan<byte> buffer)
+#else
         public override void Write(ReadOnlySpan<byte> buffer)
+#endif
         {
             if (buffer.IsEmpty)
                 throw new ArgumentNullException(nameof(buffer));

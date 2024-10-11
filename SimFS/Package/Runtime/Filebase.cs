@@ -44,6 +44,11 @@ namespace SimFS
             return path;
         }
 
+        public void Flush()
+        {
+            _fsMan.Flush();
+        }
+
         public SimFSType Exists(ReadOnlySpan<char> path)
         {
             CheckPath(ref path);
