@@ -815,10 +815,21 @@ namespace SimFS
             BitConverter.TryWriteBytes(span[3..], entryData.inodeGlobalIndex);
             _stream.Write(span);
         }
-        private void TrySaveChanges()
+
+        public bool SaveChanges()
+        {
+            var result = SelfSaveChanges();
+            foreach (var (_, subDir) in _loadedDirectories)
+            {
+                result |= subDir.SaveChanges();
+            }
+            return result;
+        }
+
+        private bool SelfSaveChanges()
         {
             if (_dirtyEntries.Count <= 0)
-                return;
+                return false;
             Span<byte> entryCountSpan = stackalloc byte[4];
             _stream.Position = 0;
             BitConverter.TryWriteBytes(entryCountSpan, _entries.Count);
@@ -842,6 +853,8 @@ namespace SimFS
                     pos += entry.entryLength;
                 }
             }
+            _dirtyEntries.Clear();
+            return true;
         }
 
         public void Dispose()
@@ -852,7 +865,7 @@ namespace SimFS
                 dir.Dispose();
             }
             _loadedDirectories.Clear();
-            TrySaveChanges();
+            SelfSaveChanges();
             _stream.Dispose();
             _stream = null;
             foreach (var (_, list) in _unusedEntries)

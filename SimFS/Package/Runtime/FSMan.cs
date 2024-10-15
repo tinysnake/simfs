@@ -68,6 +68,8 @@ namespace SimFS
                     var rootDirInode = bg0.GetInode(0);
                     _rootDirectory = LoadDirectory(rootDirInode, bg0);
                 }
+
+                SaveChanges();
             }
             catch
             {

@@ -308,8 +308,10 @@ namespace SimFS
             return _fsMan.ReadRawData(location, buffer);
         }
 
-        private void SaveChanges()
+        public bool SaveChanges()
         {
+            if (_dirtyInodes.Count <= 0)
+                return false;
             if (_dirtyInodes.Count > 0)
             {
                 foreach (var (start, length) in _dirtyInodes)
@@ -320,7 +322,9 @@ namespace SimFS
                     }
                 }
             }
+            _dirtyInodes.Clear();
             _fsMan.UpdateBlockGroupMeta(this);
+            return true;
         }
 
         public void Dispose()

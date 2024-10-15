@@ -286,10 +286,25 @@ namespace SimFS
             _writeBuffer.Flush();
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Flush()
         {
-            _writeBuffer.Flush();
+            TryFlush();
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public bool SaveChanges()
+        {
+            if (_rwLock.State == ReadWriteState.Reading)
+                return false;
+            var result = true;
+            foreach (var (_, bg) in _loadedBlockGroups)
+            {
+                result |= bg.SaveChanges();
+            }
+
+            result |= _rootDirectory.SaveChanges();
+            TryFlush();
+            return result;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
