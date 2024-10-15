@@ -455,6 +455,16 @@ namespace SimFS
             }
         }
 
+        public void SaveChanges()
+        {
+            _fsMan.SaveChanges();
+        }
+
+        public void Backup(Stream stream, Span<byte> buffer = default)
+        {
+            _fsMan.Backup(stream, buffer);
+        }
+
         public void Dispose()
         {
             _fsMan.Dispose();

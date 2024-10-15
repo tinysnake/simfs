@@ -278,6 +278,27 @@ namespace SimFS
             return _fs.Read(buffer);
         }
 
+        public void Backup(Stream stream, Span<byte> buffer)
+        {
+            if (stream == null || !stream.CanWrite)
+                throw new ArgumentException("stream is invalid");
+            if (_rwLock.State != ReadWriteState.None)
+                throw new InvalidOperationException("cannot backup file system while reading or writing data.");
+            SaveChanges();
+            using var _ = ReadWriteLocker.BeginRead(_rwLock);
+            if (buffer.IsEmpty)
+                Pooling.RentBuffer(out buffer);
+            _fs.Position = 0;
+            var read = 0;
+            do
+            {
+                read = _fs.Read(buffer);
+                if (read > 0)
+                    stream.Write(buffer[..read]);
+            }
+            while (read > 0);
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void TryFlush()
         {
@@ -296,6 +317,8 @@ namespace SimFS
         {
             if (_rwLock.State == ReadWriteState.Reading)
                 return false;
+
+            using var _ = ReadWriteLocker.BeginWrite(_rwLock);
             var result = true;
             foreach (var (_, bg) in _loadedBlockGroups)
             {
