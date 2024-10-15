@@ -1,0 +1,16 @@
+name: Sync Gitee
+on: [push]
+jobs:
+  Sync-Gitee:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Sync Gitee
+      uses: Yikun/hub-mirror-action@master
+      with:
+        src: github/tinysnake
+        dst: gitee/tinysnake
+        dst_key: ${{ secrets.GITEE_PK }}
+        dst_token: ${{ secrets.GITEE_TOKEN }}
+        static_list: simfs
+        account_type: user
+        force_update: true
