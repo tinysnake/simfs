@@ -10,6 +10,9 @@ namespace SimFS
     {
         public Filebase(string filebasePath, ushort blockSize = 1024, byte attributeSize = 0, Customizer customizer = null)
         {
+            var dir = Path.GetDirectoryName(filebasePath);
+            if (!Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
             var fs = File.Open(filebasePath, FileMode.OpenOrCreate);
             _fsMan = new FSMan(fs, blockSize, attributeSize, customizer);
         }
