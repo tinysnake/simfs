@@ -245,7 +245,7 @@ namespace SimFS
             return dir.GetFiles(pathKind, topDirectoryOnly);
         }
 
-        public void GetFiles(ReadOnlySpan<char> path, List<ReadOnlyMemory<char>> fileNames, PathKind pathKind = PathKind.Relative, bool topDirectoryOnly = true, bool throwsIfDirNotExist = false)
+        public void GetFiles(ReadOnlySpan<char> path, ICollection<ReadOnlyMemory<char>> fileNames, PathKind pathKind = PathKind.Relative, bool topDirectoryOnly = true, bool throwsIfDirNotExist = false)
         {
             CheckPath(ref path);
             var dir = GetDirectory(path, false);
@@ -271,7 +271,7 @@ namespace SimFS
             return dir.GetDirectories(pathKind, topDirectoryOnly);
         }
 
-        public void GetDirectories(ReadOnlySpan<char> path, List<ReadOnlyMemory<char>> dirNames, PathKind pathKind = PathKind.Relative, bool topDirectoryOnly = true, bool throwsIfDirNotExist = false)
+        public void GetDirectories(ReadOnlySpan<char> path, ICollection<ReadOnlyMemory<char>> dirNames, PathKind pathKind = PathKind.Relative, bool topDirectoryOnly = true, bool throwsIfDirNotExist = false)
         {
             CheckPath(ref path);
             var dir = GetDirectory(path, false);

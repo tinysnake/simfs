@@ -23,7 +23,7 @@ namespace SimFS
         private static readonly char[] InvalidChars = new[] { '\0', '/' };
         private static readonly List<SimDirectory> _trimTempList = new();
 
-        public static void GetAllChildren(List<ReadOnlyMemory<char>> basePaths, SimDirectory dir, List<ReadOnlyMemory<char>> list, SimFSType type)
+        public static void GetAllChildren(List<ReadOnlyMemory<char>> basePaths, SimDirectory dir, ICollection<ReadOnlyMemory<char>> list, SimFSType type)
         {
             foreach (var child in dir.SubDirectories)
             {
@@ -307,18 +307,24 @@ namespace SimFS
             }
         }
 
-        public void GetFiles(List<ReadOnlyMemory<char>> paths, PathKind pathKind = PathKind.Relative, bool topDirectoryOnly = true)
+        public void GetFiles(ICollection<ReadOnlyMemory<char>> paths, PathKind pathKind = PathKind.Relative, bool topDirectoryOnly = true)
         {
             if (topDirectoryOnly)
             {
                 if (pathKind == PathKind.Relative)
                 {
-                    paths.AddRange(Files);
+                    foreach (var file in Files)
+                    {
+                        paths.Add(file);
+                    }
                     return;
                 }
                 var basePaths = SimUtil.Path.PathSegmentsHolder;
                 GetFullNameSegments(basePaths);
-                paths.AddRange(Files.Select(x => SimUtil.Path.BuildPath(basePaths, x.Span)));
+                foreach (var file in Files.Select(x => SimUtil.Path.BuildPath(basePaths, x.Span)))
+                {
+                    paths.Add(file);
+                }
             }
             else
             {
@@ -406,18 +412,24 @@ namespace SimFS
             }
         }
 
-        public void GetDirectories(List<ReadOnlyMemory<char>> paths, PathKind pathKind = PathKind.Relative, bool topDirectoryOnly = true)
+        public void GetDirectories(ICollection<ReadOnlyMemory<char>> paths, PathKind pathKind = PathKind.Relative, bool topDirectoryOnly = true)
         {
             if (topDirectoryOnly)
             {
                 if (pathKind == PathKind.Relative)
                 {
-                    paths.AddRange(SubDirectories);
+                    foreach (var subDir in SubDirectories)
+                    {
+                        paths.Add(subDir);
+                    }
                     return;
                 }
                 var basePaths = SimUtil.Path.PathSegmentsHolder;
                 GetFullNameSegments(basePaths);
-                paths.AddRange(SubDirectories.Select(x => SimUtil.Path.BuildPath(basePaths, x.Span)));
+                foreach (var subDir in SubDirectories.Select(x => SimUtil.Path.BuildPath(basePaths, x.Span)))
+                {
+                    paths.Add(subDir);
+                }
             }
             else
             {
