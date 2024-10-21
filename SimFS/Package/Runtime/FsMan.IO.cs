@@ -318,7 +318,6 @@ namespace SimFS
             if (_rwLock.State == ReadWriteState.Reading)
                 return false;
 
-            using var _ = ReadWriteLocker.BeginWrite(_rwLock);
             var result = true;
             foreach (var (_, bg) in _loadedBlockGroups)
             {
