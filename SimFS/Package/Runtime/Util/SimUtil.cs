@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Collections.Immutable;
 using System.Runtime.CompilerServices;
 using System.Text;
 
@@ -52,24 +51,6 @@ namespace SimFS
             public static int IntDivideCeil(int dividend, int divisor)
             {
                 return (dividend + divisor - 1) / divisor;
-            }
-        }
-    }
-
-    partial class SimUtil
-    {
-        public static class Collection
-        {
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            public static ImmutableArray<T> ToImmutableArrayUnsafe<T>(T[] array)
-            {
-                return Unsafe.As<T[], ImmutableArray<T>>(ref array);
-            }
-
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            public static T[] FromImmutableArrayUnsafe<T>(ImmutableArray<T> array)
-            {
-                return Unsafe.As<ImmutableArray<T>, T[]>(ref array);
             }
         }
     }
