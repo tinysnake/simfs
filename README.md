@@ -1,5 +1,7 @@
 # SimFS
 
+[简体中文](./README_zh-CN.md)
+
 SimFS is a Single File Simulated File System written in C#.
 * It's designed to store a large number of small files.
 * It runs faster and allocates less memory than the actual file system.
