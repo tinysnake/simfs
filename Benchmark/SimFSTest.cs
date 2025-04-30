@@ -29,13 +29,13 @@ public class SimFSTest : IFileSystemTest
 
     public int ReadFile(string path, byte[] buffer)
     {
-        using var fs = _fb.Open(path, OpenFileMode.Open);
+        using var fs = _fb.OpenFile(path, OpenFileMode.Open);
         return fs.Read(buffer);
     }
 
     public void DeleteAll(string basePath)
     {
-        var files = _fb.GetFiles(basePath, PathKind.Absolute);
+        var files = _fb.GetFiles(basePath, OutPathKind.Absolute);
         foreach (var file in files)
         {
             _fb.Delete(file.Span);

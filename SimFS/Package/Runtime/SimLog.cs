@@ -7,7 +7,7 @@ namespace SimFS
 #if UNITY_2017_1_OR_NEWER
             UnityEngine.Debug.Log(str);
 #else
-            System.Console.WriteLine(obj);
+            System.Console.WriteLine(str);
 #endif
         }
 
