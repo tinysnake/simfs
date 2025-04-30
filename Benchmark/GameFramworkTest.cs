@@ -47,7 +47,4 @@ public class GameFramworkTest : IFileSystemTest
         }
     }
 
-    public void Flush()
-    {
-    }
 }

@@ -31,34 +31,40 @@ namespace SimFS
         private readonly SimDirectory _rootDirectory;
         private readonly Dictionary<int, BlockGroup> _loadedBlockGroups;
         private readonly List<BlockGroupHead> _cachedBlockGroupHeads;
-        private readonly HashSet<int> _openedFiles;
         private int _cachedBlockGroupFirstIndex;
+        private readonly HashSet<Transaction> _allocatedTransactions;
+        //private readonly Dictionary<int, SimFileStream> _openedWriteFiles;
+        //private readonly Dictionary<int, int> _openedReadFiles;
+        private readonly Dictionary<int, FileSharingData> _fileSharingDataDict;
 
         internal int loadedDirectories = 0;
 
         internal Pooling Pooling { get; private set; }
         internal Customizer Customizer { get; private set; }
 
-        public FSMan(Stream stream, ushort blockSize, byte attributeSize, Customizer customizer = null)
+        internal FSMan(Stream stream, ushort blockSize, byte attributeSize, Customizer customizer = null)
         {
             if (!stream.CanSeek || !stream.CanRead || !stream.CanWrite)
                 throw new ArgumentException("stream is not valid");
             _fs = stream;
-            _rwLock = new ReadWriteLock();
             _loadedBlockGroups = new Dictionary<int, BlockGroup>();
             _cachedBlockGroupHeads = new List<BlockGroupHead>();
-            _openedFiles = new HashSet<int>();
+            _allocatedTransactions = new HashSet<Transaction>();
+            //_openedWriteFiles = new Dictionary<int, SimFileStream>();
+            //_openedReadFiles = new Dictionary<int, int>();
+            _fileSharingDataDict = new Dictionary<int, FileSharingData>();
+            _smallBuffer = new byte[FSHeadData.RESERVED_SIZE];
             Customizer = customizer ?? new Customizer();
-            Pooling = new Pooling(Customizer.BufferSize);
-            Pooling.MaxBufferSize = Customizer.BufferSize;
+            Pooling = new Pooling(Customizer);
             try
             {
                 if (stream.Length == 0)
                 {
                     var headData = new FSHeadData(blockSize, attributeSize);
-                    _head = SetupFileSystem(headData, blockSize * 8);
+                    _head = SetupFileSystem(headData);
                     var bg0 = AllocateBlockGroup();
-                    var rootDirInode = AllocateInode(InodeUsage.Directory, out _, 4);
+                    using var t = BeginTransaction(TransactionMode.Immediate, null);
+                    var rootDirInode = AllocateInode(t, InodeUsage.Directory, out _, 4);
                     _rootDirectory = LoadDirectory(rootDirInode, bg0);
                 }
                 else
@@ -68,8 +74,6 @@ namespace SimFS
                     var rootDirInode = bg0.GetInode(0);
                     _rootDirectory = LoadDirectory(rootDirInode, bg0);
                 }
-
-                SaveChanges();
             }
             catch
             {
@@ -81,16 +85,34 @@ namespace SimFS
             SimDirectory LoadDirectory(InodeInfo inodeInfo, BlockGroup bg)
             {
                 var dir = Pooling.DirectoryPool.Get();
-                dir.LoadInfo(this, null, inodeInfo, bg, SimDirectory.ROOT_DIR_NAME.AsMemory());
+                dir.LoadInfo(this, null, inodeInfo, bg, SimDirectory.ROOT_DIR_NAME.AsMemory(), 0);
                 return dir;
             }
 
         }
 
-        public FSHead Head => _head;
-        public SimDirectory RootDirectory => _rootDirectory;
+        internal FSHead Head => _head;
+        internal SimDirectory RootDirectory => _rootDirectory;
 
-        public BlockGroup GetBlockGroup(int groupIndex)
+        internal Transaction BeginTransaction(TransactionMode mode, string friendlyName)
+        {
+            if (Pooling.TransactionPool.HasItem)
+            {
+                var t = Pooling.TransactionPool.Get();
+                t.ReInitialize(this, mode, friendlyName);
+                _allocatedTransactions.Add(t);
+                return t;
+            }
+            return new Transaction(this, mode, friendlyName);
+        }
+
+        internal void EndTransaction(Transaction t)
+        {
+            _allocatedTransactions.Remove(t);
+            Pooling.TransactionPool.Return(t);
+        }
+
+        internal BlockGroup GetBlockGroup(int groupIndex)
         {
             if (_loadedBlockGroups.TryGetValue(groupIndex, out var bg))
                 return bg;
@@ -135,7 +157,6 @@ namespace SimFS
             if (_loadedBlockGroups.TryGetValue(groupIndex, out var bg))
                 return bg.Head;
 
-            WriteBuffer.Flush();
             if (groupIndex < _cachedBlockGroupFirstIndex || groupIndex >= _cachedBlockGroupFirstIndex + Customizer.MaxCachedBlockGroupHead)
             {
                 TryMoveCacheBlockGroupHeadIndex(groupIndex);
@@ -208,32 +229,32 @@ namespace SimFS
             _cachedBlockGroupFirstIndex += dir * size;
         }
 
-        public InodeInfo GetInode(int inodeGlobalIndex, out BlockGroup bg)
+        internal InodeInfo GetInode(int inodeGlobalIndex, out BlockGroup bg)
         {
             var (bgIndex, inodeIndex) = GetLocalIndex(inodeGlobalIndex, _head.BlockSize);
             bg = GetBlockGroup(bgIndex);
             return bg.GetInode(inodeIndex);
         }
 
-        public InodeInfo AllocateInode(InodeUsage usage, out BlockGroup bg, int blockCount = -1)
-            => AllocateInode(usage, out bg, -1, blockCount);
+        internal InodeInfo AllocateInode(Transaction transaction, InodeUsage usage, out BlockGroup bg, int blockCount = -1)
+            => AllocateInode(transaction, usage, out bg, -1, blockCount);
 
-        private InodeInfo AllocateInode(InodeUsage usage, out BlockGroup bg, int exceptIndex, int blockCount = -1)
+        private InodeInfo AllocateInode(Transaction transaction, InodeUsage usage, out BlockGroup bg, int exceptIndex, int blockCount = -1)
         {
             if (blockCount <= 0)
                 blockCount = 1;
             BlockPointerData bpd;
-            bpd = TryAllocateSpace(1, blockCount, exceptIndex, out bg);
+            bpd = TryAllocateSpace(transaction, 1, blockCount, exceptIndex, out bg);
             if (!bpd.IsEmpty)
             {
-                var result = bg.AllocateInode(usage, _head.AttributeSize);
-                AssignBlockToInode(bg, ref result, bpd);
+                var result = bg.AllocateInode(transaction, usage, _head.AttributeSize);
+                AssignBlockToInode(transaction, bg, ref result, bpd);
                 return result;
             }
-            throw new InvalidOperationException();
+            throw new SimFSException(ExceptionType.UnableToAllocateInode);
         }
 
-        public InodeInfo AllocateInodeNear(int inodeGlobalIndex, InodeUsage usage, out BlockGroup bg, int blockCount = -1)
+        internal InodeInfo AllocateInodeNear(Transaction transaction, int inodeGlobalIndex, InodeUsage usage, out BlockGroup bg, int blockCount = -1)
         {
             if (blockCount <= 0)
                 blockCount = 1;
@@ -241,44 +262,44 @@ namespace SimFS
             bg = GetBlockGroup(bgIndex);
             if (bg.FreeInodesCount > 0 && bg.FreeBlocksCount >= blockCount)
             {
-                var bpd = bg.AllocateBlock(blockCount);
+                var bpd = bg.AllocateBlock(transaction, blockCount);
                 if (!bpd.IsEmpty)
                 {
-                    var result = bg.AllocateInode(usage, _head.AttributeSize);
-                    AssignBlockToInode(bg, ref result, bpd);
+                    var result = bg.AllocateInode(transaction, usage, _head.AttributeSize);
+                    AssignBlockToInode(transaction, bg, ref result, bpd);
                     return result;
                 }
             }
-            return AllocateInode(usage, out bg, blockCount);
+            return AllocateInode(transaction, usage, out bg, blockCount);
         }
 
-        private void AssignBlockToInode(BlockGroup bg, ref InodeInfo info, BlockPointerData bpd)
+        private void AssignBlockToInode(Transaction transaction, BlockGroup bg, ref InodeInfo info, BlockPointerData bpd)
         {
             var data = info.data;
             if (!data.blockPointers[0].IsEmpty)
-                throw new SimFSException(ExceptionType.InternalError, "this inode is not empty");
+                throw new SimFSException(ExceptionType.InvalidInode, $"this inode:{info.globalIndex} is not empty, cannot assign block to it");
             data.blockPointers[0] = bpd;
-            bg.UpdateInode(info);
+            bg.UpdateInode(transaction, info);
         }
 
-        public void FreeInode(int inodeGlobalIndex)
+        internal void FreeInode(Transaction transaction, int inodeGlobalIndex)
         {
             var (bgIndex, localIndex) = GetLocalIndex(inodeGlobalIndex, _head.BlockSize);
             var bg = GetBlockGroup(bgIndex);
             var inodeInfo = bg.GetInode(localIndex);
-            FreeInodeBlocks(inodeInfo.data);
-            bg.FreeInode(localIndex);
+            FreeInodeBlocks(transaction, inodeInfo.data);
+            bg.FreeInode(transaction, localIndex);
         }
 
-        public void FreeInode(InodeInfo inode)
+        internal void FreeInode(Transaction transaction, InodeInfo inode)
         {
             var (bgIndex, localIndex) = GetLocalIndex(inode.globalIndex, _head.BlockSize);
             var inodeBg = GetBlockGroup(bgIndex);
-            FreeInodeBlocks(inode.data);
-            inodeBg.FreeInode(localIndex);
+            FreeInodeBlocks(transaction, inode.data);
+            inodeBg.FreeInode(transaction, localIndex);
         }
 
-        private void FreeInodeBlocks(InodeData data)
+        private void FreeInodeBlocks(Transaction transaction, InodeData data)
         {
             for (var i = 0; i < data.blockPointers.Length; i++)
             {
@@ -287,12 +308,12 @@ namespace SimFS
                     break;
                 var (bgIndex, _) = GetLocalIndex(bpd.globalIndex, _head.BlockSize);
                 var bg = GetBlockGroup(bgIndex);
-                bg.FreeBlocks(bpd);
+                bg.FreeBlocks(transaction, bpd);
                 data.blockPointers[i] = default;
             }
         }
 
-        public BlockPointerData AllocateBlockNearInode(int inodeGlobalIndex, out BlockGroup bg, int blockCount = -1)
+        internal BlockPointerData AllocateBlockNearInode(Transaction transaction, int inodeGlobalIndex, out BlockGroup bg, int blockCount = -1)
         {
             if (blockCount <= 0)
                 blockCount = 1;
@@ -300,17 +321,17 @@ namespace SimFS
             bg = GetBlockGroup(bgIndex);
             if (bg.FreeBlocksCount >= blockCount)
             {
-                var blockPointer = bg.AllocateBlock(blockCount);
+                var blockPointer = bg.AllocateBlock(transaction, blockCount);
                 if (!blockPointer.IsEmpty)
                     return blockPointer;
             }
-            var nbps = TryAllocateSpace(0, blockCount, inodeGlobalIndex, out bg);
+            var nbps = TryAllocateSpace(transaction, 0, blockCount, inodeGlobalIndex, out bg);
             if (nbps.IsEmpty)
                 throw new NotImplementedException("allocate from unloaded groups is not implemented");
             return nbps;
         }
 
-        private BlockPointerData TryAllocateSpace(int inodeCountRequired, int blocCountRequired, int exceptIndex, out BlockGroup bg)
+        private BlockPointerData TryAllocateSpace(Transaction transaction, int inodeCountRequired, int blocCountRequired, int exceptIndex, out BlockGroup bg)
         {
             BlockPointerData bpd;
             foreach (var (index, lbg) in _loadedBlockGroups)
@@ -320,7 +341,7 @@ namespace SimFS
                 if (lbg.FreeInodesCount >= inodeCountRequired && lbg.FreeBlocksCount >= blocCountRequired)
                 {
                     bg = lbg;
-                    bpd = lbg.AllocateBlock(blocCountRequired);
+                    bpd = lbg.AllocateBlock(transaction, blocCountRequired);
                     if (!bpd.IsEmpty)
                         return bpd;
                 }
@@ -336,39 +357,101 @@ namespace SimFS
                 if (head.freeInodes >= inodeCountRequired && head.freeBlocks >= blocCountRequired)
                 {
                     bg = GetBlockGroup(i);
-                    bpd = bg.AllocateBlock(blocCountRequired);
+                    bpd = bg.AllocateBlock(transaction, blocCountRequired);
                     if (!bpd.IsEmpty)
                         return bpd;
                 }
             }
 
             bg = AllocateBlockGroup();
-            bpd = bg.AllocateBlock(blocCountRequired);
+            bpd = bg.AllocateBlock(transaction, blocCountRequired);
             if (!bpd.IsEmpty)
                 return bpd;
-            throw new SimFSException(ExceptionType.InvalidOperation, "There're no demands that a brand new BlockGroup cannot fulfill!");
+            throw new SimFSException(ExceptionType.InternalError, "There're no demands that a brand new BlockGroup cannot fulfill!");
         }
 
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public SimFileStream LoadFileStream(InodeInfo inode, BlockGroup bg = null)
+        internal SimFileStream LoadFileStream(InodeInfo inode, FileAccess access, Transaction transaction, SimDirectory parentDir, BlockGroup bg = null)
+        {
+            if (access > FileAccess.Read)
+            {
+                if (transaction == null)
+                    throw new SimFSException(ExceptionType.MissingTransaction);
+            }
+            return DangerouslyLoadFileStream(inode, access, transaction, parentDir, bg);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal SimFileStream DangerouslyLoadFileStream(InodeInfo inode, FileAccess access, Transaction transaction, SimDirectory parentDir, BlockGroup bg = null)
         {
             var fs = Pooling.FileStreamPool.Get();
-            fs.LoadFileStream(this, inode, bg);
+            if (parentDir != null)
+                fs.LoadFileStream(this, inode, access, parentDir, bg);
+            else
+                fs.LoadFileStreamWithoutParent(this, inode, access, bg);
+            if (access == FileAccess.ReadWrite && transaction != null)
+                fs.WithTransaction(transaction);
             return fs;
         }
 
-        public void TryOpenFile(int inodeGlobalIndex)
+        internal FileSharingData TryOpenFile(int inodeGlobalIndex, SimFileStream file, FileAccess access)
         {
-            if (_openedFiles.Contains(inodeGlobalIndex))
-                throw new SimFSException(ExceptionType.FileAlreadyOpended, $"inode: {inodeGlobalIndex}");
+            if (!file.IsValid || file.InodeInfo.globalIndex != inodeGlobalIndex)
+                throw new SimFSException(ExceptionType.InvalidFileStream);
+            if (!_fileSharingDataDict.TryGetValue(inodeGlobalIndex, out var sd))
+            {
+                sd = Pooling.FileSharingDataPool.Get();
+                sd.Initialize(inodeGlobalIndex);
+                _fileSharingDataDict[inodeGlobalIndex] = sd;
+            }
 
-            _openedFiles.Add(inodeGlobalIndex);
+            if (access == FileAccess.Read)
+            {
+                sd.ReadAccessCount++;
+            }
+            else
+            {
+                sd.EnterWriteState(file);
+            }
+            return sd;
         }
 
-        public void CloseFile(int inodeGlobalIndex)
+        internal void CloseFile(int inodeGlobalIndex, SimFileStream file, FileAccess access)
         {
-            _openedFiles.Remove(inodeGlobalIndex);
+            if (!file.IsValid || file.InodeInfo.globalIndex != inodeGlobalIndex)
+                throw new SimFSException(ExceptionType.InvalidFileStream);
+            if (!_fileSharingDataDict.TryGetValue(inodeGlobalIndex, out var sd))
+                throw new SimFSException(ExceptionType.InvalidFileStream, $"all permissions related to the file: {inodeGlobalIndex} are already released.");
+            if (access == FileAccess.Read)
+            {
+                sd.ReadAccessCount--;
+            }
+            else
+            {
+                sd.ExitWriteState(file);
+            }
+
+            if (sd.IsEmpty)
+            {
+                _fileSharingDataDict.Remove(inodeGlobalIndex);
+                Pooling.FileSharingDataPool.Return(sd);
+            }
+        }
+
+        internal bool IsFileOpen(int inodeGlobalIndex) => _fileSharingDataDict.TryGetValue(inodeGlobalIndex, out var sd) &&
+            (sd.ReadAccessCount > 0 || sd.WriteAccessInstance != null);
+
+        internal SimFileStream GetLoadedFileStream(int inodeGlobalIndex)
+        {
+            if (_fileSharingDataDict.TryGetValue(inodeGlobalIndex, out var sd))
+                return sd.WriteAccessInstance;
+            return null;
+        }
+
+        public void ForceDispose()
+        {
+            DisposeIO();
         }
 
         public void Dispose()
@@ -378,6 +461,10 @@ namespace SimFS
             {
                 bg.Dispose();
             }
+
+            if (_allocatedTransactions.Count > 0)
+                throw new SimFSException(ExceptionType.UnsaveChangesMade);
+
             _loadedBlockGroups.Clear();
             DisposeIO();
         }

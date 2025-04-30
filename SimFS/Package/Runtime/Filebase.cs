@@ -47,9 +47,11 @@ namespace SimFS
             return path;
         }
 
-        public void Flush()
+        private EnsureTransaction EnsureTransaction(Transaction t, TransactionMode mode = TransactionMode.Immediate) => new(t, _fsMan, mode);
+
+        public Transaction BeginTransaction(string friendlyName = null)
         {
-            _fsMan.Flush();
+            return _fsMan.BeginTransaction(TransactionMode.Manual, friendlyName);
         }
 
         public SimFSType Exists(ReadOnlySpan<char> path)
@@ -62,7 +64,7 @@ namespace SimFS
             return SimFSType.Any;
         }
 
-        public bool Exists(ReadOnlySpan<char> path, SimFSType fsType = SimFSType.Any)
+        public bool Exists(ReadOnlySpan<char> path, SimFSType fsType)
         {
             CheckPath(ref path);
             var parentDir = GetParentDirectory(path, out var fileName);
@@ -81,7 +83,7 @@ namespace SimFS
             CheckPath(ref path);
             var parentDir = GetDirectory(parentDirPath);
             if (parentDir == null) return false;
-            parentDir = GetParentDirectoryRelatively(parentDir, path, out var fileName, out _, false);
+            parentDir = GetParentDirectoryRelatively(null, parentDir, path, out var fileName, out _, false);
             if (parentDir == null) return false;
             return fsType switch
             {
@@ -92,7 +94,7 @@ namespace SimFS
             };
         }
 
-        public void Delete(ReadOnlySpan<char> path, SimFSType fsType = SimFSType.Any, bool throwsIfNotExist = false)
+        public void Delete(ReadOnlySpan<char> path, SimFSType fsType = SimFSType.Any, Transaction transaction = null, bool throwsIfNotExist = false)
         {
             CheckPath(ref path);
             var parentDir = GetParentDirectory(path, out var fileName);
@@ -102,18 +104,52 @@ namespace SimFS
                     throw new SimFSException(ExceptionType.DirectoryNotFound);
                 return;
             }
+            using var et = EnsureTransaction(transaction);
             var deleted = fsType switch
             {
-                SimFSType.Any => parentDir.TryDeleteChild(fileName),
-                SimFSType.File => parentDir.TryDeleteFile(fileName),
-                SimFSType.Directory => parentDir.TryDeleteDirectory(fileName),
+                SimFSType.Any => parentDir.TryDeleteChild(et, fileName),
+                SimFSType.File => parentDir.TryDeleteFile(et, fileName),
+                SimFSType.Directory => parentDir.TryDeleteDirectory(et, fileName),
                 _ => throw new NotSupportedException(fsType.ToString()),
             };
             if (!deleted && throwsIfNotExist)
                 throw new SimFSException(ExceptionType.FileNotFound);
         }
 
-        public void Move(ReadOnlySpan<char> path, ReadOnlySpan<char> targetPath, SimFSType fsType = SimFSType.Any, bool overwrite = true, bool throws = false)
+
+        public void Delete(SimFileInfo file, Transaction transaction = null, bool throwsIfNotExist = false)
+        {
+            var parentDir = file.ParentDirectory;
+            if (parentDir == null)
+            {
+                if (throwsIfNotExist)
+                    throw new SimFSException(ExceptionType.DirectoryNotFound);
+                return;
+            }
+            using var et = EnsureTransaction(transaction);
+            var deleted = parentDir.TryDeleteFile(transaction, file.Name);
+            if (!deleted && throwsIfNotExist)
+                throw new SimFSException(ExceptionType.FileNotFound);
+        }
+
+
+        public void Delete(SimDirectoryInfo dir, Transaction transaction = null, bool throwsIfNotExist = false)
+        {
+            var curDir = dir.GetDirectory(throwsIfNotExist);
+            var parentDir = curDir.Parent;
+            if (parentDir == null)
+            {
+                if (throwsIfNotExist)
+                    throw new SimFSException(ExceptionType.DirectoryNotFound);
+                return;
+            }
+            using var et = EnsureTransaction(transaction);
+            var deleted = parentDir.TryDeleteFile(transaction, dir.Name);
+            if (!deleted && throwsIfNotExist)
+                throw new SimFSException(ExceptionType.FileNotFound);
+        }
+
+        public void Move(ReadOnlySpan<char> path, ReadOnlySpan<char> targetPath, SimFSType fsType = SimFSType.Any, bool overwrite = true, Transaction transaction = null, bool throws = false)
         {
             CheckPath(ref path);
             var fromDir = GetParentDirectory(path, out var fromName);
@@ -121,68 +157,231 @@ namespace SimFS
                 throw new SimFSException(ExceptionType.DirectoryNotFound);
             if (!fromDir.HasChild(fromName, out _) && throws)
                 throw new SimFSException(ExceptionType.FileNotFound);
-            var toDir = GetParentDirectory(targetPath, out var toName, true);
-            if (!fromDir.TryMoveChild(fromName, toDir, toName, overwrite) && throws)
-                throw new SimFSException(ExceptionType.FileAlreadyExists, targetPath.ToString());
+            var et = EnsureTransaction(transaction);
+            var success = false;
+            try
+            {
+                var toDir = GetParentDirectory(et, targetPath, out var toName, true);
+                if (!fromDir.TryMoveChild(et, fromName, toDir, toName, overwrite) && throws)
+                    throw new SimFSException(ExceptionType.FileAlreadyExists, targetPath.ToString());
+                success = true;
+            }
+            finally
+            {
+                et.Complete(success);
+            }
         }
 
-        public void Copy(ReadOnlySpan<char> path, ReadOnlySpan<char> targetPath, SimFSType fsType = SimFSType.Any, bool overwrite = true, bool throws = false)
+        public void Move(SimFileInfo fromInfo, ReadOnlySpan<char> targetPath, bool overwrite = true, Transaction transaction = null, bool throws = false)
+        {
+            if (!fromInfo.Exists)
+            {
+                if (throws)
+                    throw new SimFSException(ExceptionType.FileNotFound, fromInfo.Name.ToString());
+                return;
+            }
+            var fromDir = fromInfo.ParentDirectory;
+            if (fromDir == null && throws)
+                throw new SimFSException(ExceptionType.DirectoryNotFound);
+            var fromName = fromInfo.Name;
+            var et = EnsureTransaction(transaction);
+            var success = false;
+            try
+            {
+                var toDir = GetParentDirectory(et, targetPath, out var toName, true);
+                if (!fromDir.TryMoveChild(et, fromName, toDir, toName, overwrite) && throws)
+                    throw new SimFSException(ExceptionType.FileAlreadyExists, targetPath.ToString());
+                success = true;
+            }
+            finally
+            {
+                et.Complete(success);
+            }
+        }
+
+        public void Move(SimDirectoryInfo fromInfo, ReadOnlySpan<char> targetPath, bool overwrite = true, Transaction transaction = null, bool throws = false)
+        {
+            var dir = fromInfo.GetDirectory(throws);
+            var fromName = fromInfo.Name;
+            var fromDir = dir.Parent;
+            var et = EnsureTransaction(transaction);
+            var success = false;
+            try
+            {
+                var toDir = GetParentDirectory(et, targetPath, out var toName, true);
+                if (!fromDir.TryMoveChild(et, fromName, toDir, toName, overwrite) && throws)
+                    throw new SimFSException(ExceptionType.FileAlreadyExists, targetPath.ToString());
+                success = true;
+            }
+            finally
+            {
+                et.Complete(success);
+            }
+        }
+
+        public void Copy(ReadOnlySpan<char> path, ReadOnlySpan<char> targetPath, bool overwrite = true, Transaction transaction = null, bool throws = false)
         {
             var fromDir = GetParentDirectory(path, out var fromName);
             if (fromDir == null && throws)
                 throw new SimFSException(ExceptionType.DirectoryNotFound, path.ToString());
             if (!fromDir.HasChild(fromName, out var isDir) && throws)
                 throw new SimFSException(ExceptionType.FileNotFound, path.ToString());
-            var toDir = GetParentDirectory(targetPath, out var toName, out _, !throws);
-            if (toDir == null && throws)
-                throw new SimFSException(ExceptionType.DirectoryNotFound, targetPath.ToString());
-            if (isDir)
+            var et = EnsureTransaction(transaction);
+            var success = false;
+            try
             {
+                var toDir = GetParentDirectory(et, targetPath, out var toName, out _, !throws);
+                if (toDir == null && throws)
+                    throw new SimFSException(ExceptionType.DirectoryNotFound, targetPath.ToString());
+                if (isDir)
+                {
+                    if (toDir.HasDirectory(toName) && !overwrite)
+                    {
+                        if (throws)
+                            throw new SimFSException(ExceptionType.DirectoryAlreadyExists, targetPath.ToString());
+                        return;
+                    }
+                    SimDirectory targetDir;
+                    if (throws)
+                        targetDir = toDir.GetDirectory(toName);
+                    else
+                        targetDir = toDir.GetOrCreateDirectory(et, toName);
+
+
+                    var list = new List<ReadOnlyMemory<char>>();
+                    var basePaths = SimUtil.Path.PathSegmentsHolder;
+                    SimDirectory.GetAllChildren(basePaths, fromDir.GetDirectory(fromName), list, SimFSType.File);
+                    foreach (var relFilePath in list)
+                    {
+                        using var fromFile = OpenFile(et, fromDir, relFilePath.Span, OpenFileMode.Open, FileAccess.Read, 0, throws);
+                        using var toFile = OpenFile(et, targetDir, relFilePath.Span, OpenFileMode.OpenOrCreate, FileAccess.ReadWrite, 0, throws);
+                        fromFile.CopyTo(toFile);
+                    }
+                }
+                else
+                {
+                    if (toDir.HasFile(toName) && !overwrite)
+                    {
+                        if (throws)
+                            throw new SimFSException(ExceptionType.FileAlreadyExists, targetPath.ToString());
+                        return;
+                    }
+                    using var fromFile = OpenFile(et, fromDir, fromName, OpenFileMode.Open, FileAccess.Read, 0, throws);
+                    using var toFile = OpenFile(et, toDir, toName, OpenFileMode.OpenOrCreate, FileAccess.ReadWrite, 0, throws);
+                    fromFile.CopyTo(toFile);
+                }
+                success = true;
+            }
+            finally
+            {
+                et.Complete(success);
+            }
+        }
+
+        public void Copy(SimFileInfo fromInfo, ReadOnlySpan<char> targetPath, SimFSType fsType = SimFSType.Any, bool overwrite = true, Transaction transaction = null, bool throws = false)
+        {
+            if (!fromInfo.Exists)
+            {
+                if (throws)
+                    throw new SimFSException(ExceptionType.FileNotFound, fromInfo.Name.ToString());
+            }
+            var et = EnsureTransaction(transaction);
+            var success = false;
+            try
+            {
+                var toDir = GetParentDirectory(et, targetPath, out var toName, out _, !throws);
+                if (toDir == null && throws)
+                    throw new SimFSException(ExceptionType.DirectoryNotFound, targetPath.ToString());
+                if (toDir.HasFile(toName) && !overwrite)
+                {
+                    if (throws)
+                        throw new SimFSException(ExceptionType.FileAlreadyExists, targetPath.ToString());
+                    return;
+                }
+                using var fromFile = fromInfo.OpenRead(throws);
+                using var toFile = OpenFile(et, toDir, toName, OpenFileMode.OpenOrCreate, FileAccess.ReadWrite, 0, throws);
+                fromFile.CopyTo(toFile);
+                success = true;
+            }
+            finally
+            {
+                et.Complete(success);
+            }
+        }
+
+        public void Copy(SimDirectoryInfo dir, ReadOnlySpan<char> targetPath, SimFSType fsType = SimFSType.Any, bool overwrite = true, Transaction transaction = null, bool throws = false)
+        {
+            var fromDir = dir.GetDirectory(throws);
+            var et = EnsureTransaction(transaction);
+            var success = false;
+            try
+            {
+                var toDir = GetParentDirectory(et, targetPath, out var toName, out _, !throws);
+                if (toDir == null && throws)
+                    throw new SimFSException(ExceptionType.DirectoryNotFound, targetPath.ToString());
+                if (toDir.HasDirectory(toName) && !overwrite)
+                {
+                    if (throws)
+                        throw new SimFSException(ExceptionType.DirectoryAlreadyExists, targetPath.ToString());
+                    return;
+                }
                 SimDirectory targetDir;
                 if (throws)
                     targetDir = toDir.GetDirectory(toName);
                 else
-                    targetDir = toDir.GetOrCreateDirectory(toName);
+                    targetDir = toDir.GetOrCreateDirectory(et, toName);
+
 
                 var list = new List<ReadOnlyMemory<char>>();
                 var basePaths = SimUtil.Path.PathSegmentsHolder;
-                SimDirectory.GetAllChildren(basePaths, fromDir.GetDirectory(fromName), list, SimFSType.File);
+                SimDirectory.GetAllChildren(basePaths, fromDir, list, SimFSType.File);
                 foreach (var relFilePath in list)
                 {
-                    using var fromFile = OpenFile(fromDir, relFilePath.Span, OpenFileMode.Open, 0, throws);
-                    using var toFile = OpenFile(targetDir, relFilePath.Span, OpenFileMode.OpenOrCreate, 0, throws);
+                    using var fromFile = OpenFile(et, fromDir, relFilePath.Span, OpenFileMode.Open, FileAccess.Read, 0, throws);
+                    using var toFile = OpenFile(et, targetDir, relFilePath.Span, OpenFileMode.OpenOrCreate, FileAccess.ReadWrite, 0, throws);
                     fromFile.CopyTo(toFile);
                 }
+                success = true;
             }
-            else
+            finally
             {
-                using var fromFile = OpenFile(fromDir, fromName, OpenFileMode.Open, 0, throws);
-                using var toFile = OpenFile(toDir, toName, OpenFileMode.OpenOrCreate, 0, throws);
-                fromFile.CopyTo(toFile);
+                et.Complete(success);
             }
         }
 
-
-        public SimFileStream OpenFile(ReadOnlySpan<char> path, OpenFileMode mode, int fileSize = -1, bool throwsIfNotExists = true)
+        public SimFileStream OpenFile(ReadOnlySpan<char> path, OpenFileMode mode, Transaction transaction = null, int fileSize = -1, bool throwsIfNotExists = true)
         {
             CheckPath(ref path);
             var createIfNoExists = mode > OpenFileMode.Open;
-            var dir = GetParentDirectory(path, out var fileName, createIfNoExists) ?? throw new SimFSException(ExceptionType.DirectoryNotFound, path.ToString());
-            return OpenFile(dir, fileName, mode, fileSize, throwsIfNotExists);
+            var access = createIfNoExists ? FileAccess.ReadWrite : FileAccess.Read;
+            var et = createIfNoExists ? EnsureTransaction(transaction, TransactionMode.Temproary) : default;
+            var dir = GetParentDirectory(et, path, out var fileName, createIfNoExists) ?? throw new SimFSException(ExceptionType.DirectoryNotFound, path.ToString());
+            return OpenFile(et, dir, fileName, mode, access, fileSize, throwsIfNotExists);
         }
 
-        public SimFileStream OpenFile(ReadOnlySpan<char> basePath, ReadOnlySpan<char> path, OpenFileMode mode, int fileSize = -1, bool throwsIfNotExists = true)
+        public SimFileStream OpenFile(SimDirectoryInfo parentDir, ReadOnlySpan<char> fileName, OpenFileMode mode, Transaction transaction = null, int fileSize = -1, bool throwsIfNotExists = true)
+        {
+            var dir = parentDir.GetDirectory(throwsIfNotExists);
+            var createIfNoExists = mode > OpenFileMode.Open;
+            var access = createIfNoExists ? FileAccess.ReadWrite : FileAccess.Read;
+            var et = createIfNoExists ? EnsureTransaction(transaction, TransactionMode.Temproary) : default;
+            return OpenFile(et, dir, fileName, mode, access, fileSize, throwsIfNotExists);
+        }
+
+        public SimFileStream OpenFile(ReadOnlySpan<char> basePath, ReadOnlySpan<char> path, OpenFileMode mode, Transaction transaction = null, int fileSize = -1, bool throwsIfNotExists = true)
         {
             CheckPath(ref basePath);
             CheckPath(ref path);
             var createIfNoExists = mode > OpenFileMode.Open;
-            var dir = GetDirectory(basePath, createIfNoExists) ?? throw new SimFSException(ExceptionType.DirectoryNotFound, path.ToString());
-            dir = GetParentDirectoryRelatively(dir, path, out var fileName, out var _, createIfNoExists) ?? throw new SimFSException(ExceptionType.DirectoryNotFound, path.ToString());
-            return OpenFile(dir, fileName, mode, fileSize, throwsIfNotExists);
+            var access = createIfNoExists ? FileAccess.ReadWrite : FileAccess.Read;
+            var et = createIfNoExists ? EnsureTransaction(transaction, TransactionMode.Temproary) : default;
+            var dir = GetDirectory(et, basePath, createIfNoExists) ?? throw new SimFSException(ExceptionType.DirectoryNotFound, path.ToString());
+            dir = GetParentDirectoryRelatively(et, dir, path, out var fileName, out var _, createIfNoExists) ?? throw new SimFSException(ExceptionType.DirectoryNotFound, path.ToString());
+            return OpenFile(et, dir, fileName, mode, access, fileSize, throwsIfNotExists);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private SimFileStream OpenFile(SimDirectory dir, ReadOnlySpan<char> fileName, OpenFileMode mode, int fileSize, bool throwsIfNotExists)
+        private SimFileStream OpenFile(Transaction transaction, SimDirectory dir, ReadOnlySpan<char> fileName, OpenFileMode mode, FileAccess access, int fileSize, bool throwsIfNotExists)
         {
             SimFileStream fs;
             if (mode > OpenFileMode.Open)
@@ -190,11 +389,11 @@ namespace SimFS
                 var blockCount = 1;
                 if (fileSize > 0)
                     blockCount = SimUtil.Number.NextMultipleOf(fileSize, _fsMan.Head.BlockSize) / _fsMan.Head.BlockSize;
-                fs = dir.GetOrCreateFile(fileName, blockCount);
+                fs = dir.GetOrCreateFile(transaction, fileName, access, blockCount);
             }
             else
             {
-                if (!dir.TryGetFile(fileName, out fs))
+                if (!dir.TryGetFile(null, fileName, access, out fs))
                 {
                     if (throwsIfNotExists)
                         throw new SimFSException(ExceptionType.FileNotFound, fileName.ToString());
@@ -226,16 +425,35 @@ namespace SimFS
             else return default;
         }
 
+        public SimDirectoryInfo GetDirectoryInfo(ReadOnlySpan<char> path, bool throwsIfDirNotExist = false)
+        {
+            CheckPath(ref path);
+            var dir = GetDirectory(path);
+            if (dir == null)
+            {
+                if (throwsIfDirNotExist)
+                    throw new SimFSException(ExceptionType.DirectoryNotFound, path.ToString());
+                return default;
+            }
+            return new SimDirectoryInfo(_fsMan, dir);
+        }
+
         public ReadOnlySpan<byte> ReadFileAttributes(ReadOnlySpan<char> path, bool throwsIfDirNotExist = false)
         {
             var fi = GetFileInfo(path, throwsIfDirNotExist);
             return fi.Exists ? fi.Attributes : default;
         }
 
-        public ReadOnlyMemory<char>[] GetFiles(ReadOnlySpan<char> path, PathKind pathKind = PathKind.Relative, bool topDirectoryOnly = true, bool throwsIfDirNotExist = false)
+
+        public ReadOnlySpan<byte> ReadFileAttributes(SimFileInfo fi)
+        {
+            return fi.Exists ? fi.Attributes : default;
+        }
+
+        public ReadOnlyMemory<char>[] GetFiles(ReadOnlySpan<char> path, OutPathKind pathKind = OutPathKind.Relative, bool topDirectoryOnly = true, bool throwsIfDirNotExist = false)
         {
             CheckPath(ref path);
-            var dir = GetDirectory(path, false);
+            var dir = GetDirectory(path);
             if (dir == null)
             {
                 if (throwsIfDirNotExist)
@@ -245,10 +463,10 @@ namespace SimFS
             return dir.GetFiles(pathKind, topDirectoryOnly);
         }
 
-        public void GetFiles(ReadOnlySpan<char> path, ICollection<ReadOnlyMemory<char>> fileNames, PathKind pathKind = PathKind.Relative, bool topDirectoryOnly = true, bool throwsIfDirNotExist = false)
+        public void GetFiles(ReadOnlySpan<char> path, ICollection<ReadOnlyMemory<char>> fileNames, OutPathKind pathKind = OutPathKind.Relative, bool topDirectoryOnly = true, bool throwsIfDirNotExist = false)
         {
             CheckPath(ref path);
-            var dir = GetDirectory(path, false);
+            var dir = GetDirectory(path);
             if (dir == null)
             {
                 if (throwsIfDirNotExist)
@@ -258,10 +476,10 @@ namespace SimFS
             dir.GetFiles(fileNames, pathKind, topDirectoryOnly);
         }
 
-        public ReadOnlyMemory<char>[] GetDirectories(ReadOnlySpan<char> path, PathKind pathKind = PathKind.Relative, bool topDirectoryOnly = true, bool throwsIfDirNotExist = false)
+        public ReadOnlyMemory<char>[] GetDirectories(ReadOnlySpan<char> path, OutPathKind pathKind = OutPathKind.Relative, bool topDirectoryOnly = true, bool throwsIfDirNotExist = false)
         {
             CheckPath(ref path);
-            var dir = GetDirectory(path, false);
+            var dir = GetDirectory(path);
             if (dir == null)
             {
                 if (throwsIfDirNotExist)
@@ -271,10 +489,10 @@ namespace SimFS
             return dir.GetDirectories(pathKind, topDirectoryOnly);
         }
 
-        public void GetDirectories(ReadOnlySpan<char> path, ICollection<ReadOnlyMemory<char>> dirNames, PathKind pathKind = PathKind.Relative, bool topDirectoryOnly = true, bool throwsIfDirNotExist = false)
+        public void GetDirectories(ReadOnlySpan<char> path, ICollection<ReadOnlyMemory<char>> dirNames, OutPathKind pathKind = OutPathKind.Relative, bool topDirectoryOnly = true, bool throwsIfDirNotExist = false)
         {
             CheckPath(ref path);
-            var dir = GetDirectory(path, false);
+            var dir = GetDirectory(path);
             if (dir == null)
             {
                 if (throwsIfDirNotExist)
@@ -284,31 +502,37 @@ namespace SimFS
             dir.GetDirectories(dirNames, pathKind, topDirectoryOnly);
         }
 
-        public void CreateDirectory(ReadOnlySpan<char> path, bool throwsIfAlreadyExists = false)
+        public void CreateDirectory(ReadOnlySpan<char> path, Transaction transaction = null, bool throwsIfAlreadyExists = false)
         {
-            GetDirectory(path, out var created);
+            using var et = EnsureTransaction(transaction);
+            GetDirectory(et, path, out var created);
             if (!created && throwsIfAlreadyExists)
                 throw new SimFSException(ExceptionType.DirectoryAlreadyExists);
         }
 
-        public void CreateParentDirectory(ReadOnlySpan<char> path, bool throwsIfAlreadyExists = false)
+        public void CreateParentDirectory(ReadOnlySpan<char> path, Transaction transaction, bool throwsIfAlreadyExists = false)
         {
-            GetParentDirectory(path, out _, out var dirCreated);
+            using var et = EnsureTransaction(transaction);
+            GetParentDirectory(transaction, path, out _, out var dirCreated);
             if (!dirCreated && throwsIfAlreadyExists)
                 throw new SimFSException(ExceptionType.DirectoryAlreadyExists);
         }
 
-        private SimDirectory GetParentDirectory(ReadOnlySpan<char> path, bool createIfNotExist = false) =>
-            GetParentDirectory(path, out _, out _, createIfNotExist);
-        private SimDirectory GetParentDirectory(ReadOnlySpan<char> path, out ReadOnlySpan<char> fileName, bool createIfNotExist = false) =>
-            GetParentDirectory(path, out fileName, out _, createIfNotExist);
-        private SimDirectory GetParentDirectory(ReadOnlySpan<char> path, out ReadOnlySpan<char> fileName, out bool dirCreated) =>
-            GetParentDirectory(path, out fileName, out dirCreated, true);
+        private SimDirectory GetParentDirectory(ReadOnlySpan<char> path) =>
+            GetParentDirectory(null, path, out _);
+        private SimDirectory GetParentDirectory(Transaction transaction, ReadOnlySpan<char> path, bool createIfNotExist = false) =>
+            GetParentDirectory(transaction, path, out _, out _, createIfNotExist);
+        private SimDirectory GetParentDirectory(ReadOnlySpan<char> path, out ReadOnlySpan<char> fileName) =>
+            GetParentDirectory(null, path, out fileName);
+        private SimDirectory GetParentDirectory(Transaction transaction, ReadOnlySpan<char> path, out ReadOnlySpan<char> fileName, bool createIfNotExist = false) =>
+            GetParentDirectory(transaction, path, out fileName, out _, createIfNotExist);
+        private SimDirectory GetParentDirectory(Transaction transaction, ReadOnlySpan<char> path, out ReadOnlySpan<char> fileName, out bool dirCreated) =>
+            GetParentDirectory(transaction, path, out fileName, out dirCreated, true);
 
-        private SimDirectory GetParentDirectory(ReadOnlySpan<char> path, out ReadOnlySpan<char> fileName, out bool dirCreated, bool createIfNotExist) =>
-            GetParentDirectoryRelatively(_fsMan.RootDirectory, path, out fileName, out dirCreated, createIfNotExist);
+        private SimDirectory GetParentDirectory(Transaction transaction, ReadOnlySpan<char> path, out ReadOnlySpan<char> fileName, out bool dirCreated, bool createIfNotExist) =>
+            GetParentDirectoryRelatively(transaction, _fsMan.RootDirectory, path, out fileName, out dirCreated, createIfNotExist);
 
-        private SimDirectory GetParentDirectoryRelatively(SimDirectory baseDir, ReadOnlySpan<char> path, out ReadOnlySpan<char> fileName, out bool dirCreated, bool createIfNotExist)
+        internal static SimDirectory GetParentDirectoryRelatively(Transaction transaction, SimDirectory baseDir, ReadOnlySpan<char> path, out ReadOnlySpan<char> fileName, out bool dirCreated, bool createIfNotExist)
         {
             if (path.IsEmpty)
                 throw new ArgumentNullException(nameof(path));
@@ -332,7 +556,7 @@ namespace SimFS
                 {
                     if (createIfNotExist)
                     {
-                        baseDir = baseDir.CreateDirectory(seg);
+                        baseDir = baseDir.CreateDirectory(transaction, seg);
                         dirCreated = true;
                     }
                     else
@@ -344,44 +568,47 @@ namespace SimFS
             return baseDir;
         }
 
-        private SimDirectory GetDirectory(ReadOnlySpan<char> path, bool createIfNotExist = false)
-            => GetDirectory(path, out _, createIfNotExist);
-        private SimDirectory GetDirectory(ReadOnlySpan<char> path, out bool dirCreated)
-            => GetDirectory(path, out dirCreated, true);
+        private SimDirectory GetDirectory(ReadOnlySpan<char> path) =>
+            GetDirectory(null, path, out _, false);
+        private SimDirectory GetDirectory(Transaction transaction, ReadOnlySpan<char> path, bool createIfNotExist = false)
+            => GetDirectory(transaction, path, out _, createIfNotExist);
+        private SimDirectory GetDirectory(Transaction transaction, ReadOnlySpan<char> path, out bool dirCreated)
+            => GetDirectory(transaction, path, out dirCreated, true);
 
-        private SimDirectory GetDirectory(ReadOnlySpan<char> path, out bool dirCreated, bool createIfNotExist)
+        private SimDirectory GetDirectory(Transaction transaction, ReadOnlySpan<char> path, out bool dirCreated, bool createIfNotExist)
         {
             dirCreated = false;
             if (path.CompareTo("/", StringComparison.Ordinal) == 0)
                 return _fsMan.RootDirectory;
-            var parent = GetParentDirectory(path, out var dirName, out _, createIfNotExist);
+            var parent = GetParentDirectory(transaction, path, out var dirName, out _, createIfNotExist);
             if (parent == null) return null;
             if (!parent.TryGetDirectory(dirName, out var subDir))
             {
                 if (createIfNotExist)
                 {
-                    subDir = parent.CreateDirectory(dirName);
+                    subDir = parent.CreateDirectory(transaction, dirName);
                     dirCreated = true;
                 }
             }
             return subDir;
         }
 
-        public void ClearDirectory(ReadOnlySpan<char> path, bool throwsIfNotExist = false)
+        public void ClearDirectory(ReadOnlySpan<char> path, Transaction transaction = null, bool throwsIfNotExist = false)
         {
-            var dir = GetDirectory(path, false);
+            using var et = EnsureTransaction(transaction);
+            var dir = GetDirectory(et, path, false);
             if (dir == null)
             {
                 if (throwsIfNotExist)
                     throw new SimFSException(ExceptionType.DirectoryNotFound);
             }
             else
-                dir.Clear();
+                dir.Clear(et);
         }
 
-        public void WriteAllText(ReadOnlySpan<char> path, ReadOnlySpan<char> text)
+        public void WriteAllText(ReadOnlySpan<char> path, ReadOnlySpan<char> text, Transaction transaction = null)
         {
-            using var fs = OpenFile(path, OpenFileMode.Truncate);
+            using var fs = OpenFile(path, OpenFileMode.Truncate, transaction);
             WriteTextToFile(fs, text);
         }
 
@@ -399,15 +626,17 @@ namespace SimFS
             }
         }
 
-        public void WriteAllBytes(ReadOnlySpan<char> path, ReadOnlySpan<byte> bytes)
+        public void WriteAllBytes(ReadOnlySpan<char> path, ReadOnlySpan<byte> bytes, Transaction transaction = null)
         {
-            using var fs = OpenFile(path, OpenFileMode.Truncate);
+            using var et = EnsureTransaction(transaction);
+            using var fs = OpenFile(path, OpenFileMode.Truncate, et);
             fs.Write(bytes);
         }
 
-        public void WriteAllLines<T>(ReadOnlySpan<char> path, T lines) where T : IEnumerable<string>
+        public void WriteAllLines<T>(ReadOnlySpan<char> path, T lines, Transaction transaction = null) where T : IEnumerable<string>
         {
-            using var fs = OpenFile(path, OpenFileMode.Truncate);
+            using var et = EnsureTransaction(transaction);
+            using var fs = OpenFile(path, OpenFileMode.Truncate, et);
             using var sw = new StreamWriter(fs);
             foreach (var x in lines)
             {
@@ -442,25 +671,22 @@ namespace SimFS
             return lines.ToArray();
         }
 
-        public void AppendAllText(ReadOnlySpan<char> path, ReadOnlySpan<char> text)
+        public void AppendAllText(ReadOnlySpan<char> path, ReadOnlySpan<char> text, Transaction transaction = null)
         {
-            using var fs = OpenFile(path, OpenFileMode.Append);
+            using var et = EnsureTransaction(transaction);
+            using var fs = OpenFile(path, OpenFileMode.Append, et);
             WriteTextToFile(fs, text);
         }
 
-        public void AppendAllLines<T>(ReadOnlySpan<char> path, T lines) where T : IEnumerable<string>
+        public void AppendAllLines<T>(ReadOnlySpan<char> path, T lines, Transaction transaction = null) where T : IEnumerable<string>
         {
-            using var fs = OpenFile(path, OpenFileMode.Append);
+            using var et = EnsureTransaction(transaction);
+            using var fs = OpenFile(path, OpenFileMode.Append, et);
             using var sw = new StreamWriter(fs);
             foreach (var x in lines)
             {
                 sw.WriteLine(x);
             }
-        }
-
-        public void SaveChanges()
-        {
-            _fsMan.SaveChanges();
         }
 
         public void Backup(Stream stream, Span<byte> buffer = default)
@@ -471,6 +697,11 @@ namespace SimFS
         public void Dispose()
         {
             _fsMan.Dispose();
+        }
+
+        public void ForceDispose()
+        {
+            _fsMan.ForceDispose();
         }
     }
 }

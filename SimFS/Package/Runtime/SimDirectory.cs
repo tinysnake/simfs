@@ -3,7 +3,6 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
-using System.Text;
 
 namespace SimFS
 {
@@ -43,6 +42,89 @@ namespace SimFS
             }
         }
 
+        private static void TrimLoadedDirectories(FSMan fsMan, SimDirectory dir)
+        {
+            // this is my self-made "algorithm" of trimming the directories, probably performs badly,
+            // but "should" smarter than just trimming from the top
+            var targetTrimNum = fsMan.Customizer.MaxCachedDirectoires / 10;
+            var trimCount = 0;
+            // first find out current dir chain
+            _trimTempList.Clear();
+            var parent = dir;
+            do
+            {
+                _trimTempList.Add(parent);
+                parent = parent.Parent;
+            }
+            while (parent != null);
+            _trimTempList.Reverse();
+            // start from the middle, why from the middle, 
+            //   1. the top directories probably have the fewest folders, and the revisit chances are high.
+            //   2. the bottom directoires may have the most folders, but the revisit chances are even higher.
+            var maxLoop = 1000;
+            var middlePt = 0;
+            while (maxLoop-- > 0)
+            {
+                var loopStart = 0;
+                middlePt = loopStart + (_trimTempList.Count - loopStart) / 2;
+                var tempMiddleIndex = middlePt;
+                var middleLoadedNum = 0;
+                // from the middle and step back to top to make sure we have the one that has the most loaded directories.
+                // the more loaded directories means the less important the subdirectories are.
+                // by this method, we can find out maybe the root directory containes the most loaded directoires.
+                for (var i = tempMiddleIndex; i >= 0; i--)
+                {
+                    var tempDir = _trimTempList[i];
+                    var count = tempDir._loadedDirectories.Count;
+                    if (count > middleLoadedNum)
+                    {
+                        middlePt = i;
+                        middleLoadedNum = count;
+                    }
+                }
+                // if the dirs from top to middlePt only contains 1 child, it means this directory chain is too long,
+                // and this directory tree didn't start to branch out on middlePt,
+                // so now we should start from middlePt and test again, until either:
+                //   a. _trimTempList.Count - middlePt <= 2
+                //   b. middleLoadedNum > 1
+                if (middleLoadedNum <= 1)
+                {
+                    loopStart = middlePt;
+                    if (loopStart >= _trimTempList.Count - 1)
+                        break;
+                }
+                else
+                    break;
+            }
+            // 4. now let's walk from the appropriate point to the end and trim all the "hopefully will never revisit again" dirs.
+            // why (count - 1)? because the last one is itself.
+            var keysList = new List<int>();
+            for (; middlePt < _trimTempList.Count - 1; middlePt++)
+            {
+                var loadedDirs = _trimTempList[middlePt]._loadedDirectories;
+                keysList.AddRange(loadedDirs.Select(x => x.Key));
+                var childDir = _trimTempList[middlePt + 1];
+                foreach (var key in keysList)
+                {
+                    if (key == childDir.Index)
+                        continue;
+                    var num = fsMan.loadedDirectories;
+                    var dirToRemove = loadedDirs[key];
+                    if (!dirToRemove.IsDirty)
+                    {
+                        loadedDirs[key].Dispose();
+                        loadedDirs.Remove(key);
+                        trimCount += num - fsMan.loadedDirectories;
+                    }
+                    if (trimCount >= targetTrimNum)
+                        return;
+                }
+                keysList.Clear();
+            }
+            // loaded directories may have unsaved changed so this might not trim down enough directories.
+            // throw new SimFSException(ExceptionType.InternalError, "unexpected behavior on directory triming");
+        }
+
         internal SimDirectory()
         {
 
@@ -51,9 +133,28 @@ namespace SimFS
         internal void InPool()
         {
             if (_loadedDirectories.Count > 0)
-                throw new SimFSException(ExceptionType.InternalError, "should first dispose all loaded Directories, then InPool");
+                throw new SimFSException(ExceptionType.InvalidDirectory, "should first dispose all loaded Directories, then InPool");
             if (_stream != null)
-                throw new SimFSException(ExceptionType.InternalError, "should first dispose self stream, then InPool");
+                throw new SimFSException(ExceptionType.InvalidDirectory, "should first dispose self stream, then InPool");
+            if (transactionData != null)
+            {
+                var tp = _fsMan.Pooling.TransactionPooling;
+                if (transactionData.Count > 0)
+                {
+                    Span<int> transactionIds = stackalloc int[transactionData.Count];
+                    var tidIndex = 0;
+                    foreach (var (id, _) in transactionData)
+                    {
+                        transactionIds[tidIndex++] = id;
+                    }
+                    foreach (var tid in transactionIds)
+                    {
+                        DisposeTransactionData(tid);
+                    }
+                }
+                tp.DirTransDataDictPool.Return(transactionData);
+                transactionData = null;
+            }
             _inodeGlobalIndex = -1;
             _inode = default;
             _fsMan = null;
@@ -62,12 +163,11 @@ namespace SimFS
             _files.Clear();
             _dirs.Clear();
             _unusedEntries.Clear();
-            _dirtyEntries.Clear();
             _initialized = false;
             _disposed = true;
         }
 
-        internal void LoadInfo(FSMan fsMan, SimDirectory parent, InodeInfo inode, BlockGroup bg, ReadOnlyMemory<char> name)
+        internal void LoadInfo(FSMan fsMan, SimDirectory parent, InodeInfo inode, BlockGroup bg, ReadOnlyMemory<char> name, int childEntryIndex)
         {
             var isRootDir = parent == null && name.Span.CompareTo(ROOT_DIR_NAME, StringComparison.Ordinal) == 0;
             if (!isRootDir && parent == null)
@@ -77,39 +177,49 @@ namespace SimFS
             inode.ThrowsIfNotValid();
 
             var comparer = fsMan.Customizer.NameComparer;
-            _loadedDirectories ??= new Dictionary<ReadOnlyMemory<char>, SimDirectory>(comparer);
+            _loadedDirectories ??= new Dictionary<int, SimDirectory>();
             _files ??= new Dictionary<ReadOnlyMemory<char>, int>(comparer);
             _dirs ??= new Dictionary<ReadOnlyMemory<char>, int>(comparer);
 
             _fsMan = fsMan;
+            _childIndex = childEntryIndex;
             Parent = parent;
             Name = name;
             (_inodeGlobalIndex, _inode) = inode;
             _stream = _fsMan.Pooling.FileStreamPool.Get();
-            _stream.LoadFileStream(fsMan, inode, bg);
+            //if (parent != null)
+            //SimLog.Log($"creating dir: {parent.BuildFullName(name.Span)}, inode: {inode.globalIndex}");
+            _stream = _fsMan.DangerouslyLoadFileStream(inode, FileAccess.ReadWrite, null, this, bg);
             _fsMan.loadedDirectories++;
             if (_fsMan.loadedDirectories > _fsMan.Customizer.MaxCachedDirectoires)
-                TrimLoadedDirectories();
+                TrimLoadedDirectories(_fsMan, this);
             _disposed = false;
+            _deleted = false;
         }
 
         private int _inodeGlobalIndex;
+        private int _childIndex;
         private InodeData _inode;
         private FSMan _fsMan;
         private SimFileStream _stream;
         private bool _initialized;
+        private bool _deleted;
         private bool _disposed;
 
-        private Dictionary<ReadOnlyMemory<char>, SimDirectory> _loadedDirectories = new(NameComparer.Ordinal);
+        private Dictionary<int, SimDirectory> _loadedDirectories = new();
         private Dictionary<ReadOnlyMemory<char>, int> _files = new(NameComparer.Ordinal);
         private Dictionary<ReadOnlyMemory<char>, int> _dirs = new(NameComparer.Ordinal);
         private readonly List<DirectoryEntryData> _entries = new();
         private readonly List<ReadOnlyMemory<char>> _names = new();
         private readonly SortedList<(int nameLength, List<int> indices)> _unusedEntries = new(UnusedEntryComparer.Default);
-        private readonly RangeList _dirtyEntries = new();
+        internal Dictionary<int, DirectoryTransactionData> transactionData = null;
 
+        public InodeInfo InodeInfo => _stream.InodeInfo;
+        public int Index => _childIndex;
         public ReadOnlyMemory<char> Name { get; private set; }
         public SimDirectory Parent { get; private set; }
+
+        public bool IsValid => _stream != null;
 
         public KeyEnumerable Files
         {
@@ -136,6 +246,9 @@ namespace SimFS
                 return new AllEntryEnumerable(this);
             }
         }
+
+        private bool IsDirty => transactionData != null && transactionData.Any(static x =>
+            (x.Value.childrenChanges?.Count ?? 0) + (x.Value.entryChanges?.Count ?? 0) > 0);
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private BufferHolder<char> TempName(ReadOnlySpan<char> dirName, out ReadOnlyMemory<char> tempName)
@@ -169,10 +282,32 @@ namespace SimFS
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void ThrowsIfNotValid()
+        public void ThrowsIfNotValid() => ThrowsIfNotValid(true, true);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void ThrowsIfNotValid(bool checkDisposed, bool checkDeleted)
         {
-            if (_inodeGlobalIndex < 0 || _fsMan == null || _inode.IsEmpty || _stream == null)
+            if (checkDisposed && _disposed)
+                throw new SimFSException(ExceptionType.DirectoryAlreadyDisposed);
+            if (checkDeleted)
+            {
+                if (_deleted)
+                    throw new SimFSException(ExceptionType.DirectoryAlreadyDeleted);
+                if (_inodeGlobalIndex < 0 || _fsMan == null || _inode.IsEmpty || _stream == null)
+                    throw new SimFSException(ExceptionType.InvalidDirectory);
+                if (_stream != null && _stream.InodeInfo.globalIndex != _inodeGlobalIndex)
+                    throw new SimFSException(ExceptionType.InvalidDirectory, $"inode index doesn't match, dir: {_inodeGlobalIndex}, stream: {_stream.InodeInfo.globalIndex}");
+            }
+            else if (_deleted)
+            {
+                if (_inodeGlobalIndex < 0 || _fsMan == null)
+                    throw new SimFSException(ExceptionType.InvalidDirectory);
+            }
+            else if (_inodeGlobalIndex < 0 || _fsMan == null || _inode.IsEmpty || _stream == null)
                 throw new SimFSException(ExceptionType.InvalidDirectory);
+
+            if (_stream != null && _stream.InodeInfo.globalIndex != _inodeGlobalIndex)
+                throw new SimFSException(ExceptionType.InvalidDirectory, $"inode index doesn't match, dir: {_inodeGlobalIndex}, stream: {_stream.InodeInfo.globalIndex}");
         }
 
         public bool HasChild(ReadOnlySpan<char> fileName, out bool isDir)
@@ -199,7 +334,18 @@ namespace SimFS
             return TryGetEntry(tempName, isDir: false, out _);
         }
 
-        public SimFileStream CreateFile(ReadOnlySpan<char> fileName, int blockCount = -1)
+        public SimFileStream GetFile(Transaction transaction, ReadOnlySpan<char> fileName, FileAccess access)
+        {
+            ThrowsIfNotValid();
+            ThrowsIfNameIsInvalid(fileName);
+            TryInitialize();
+            using var _ = TempName(fileName, out var tempName);
+            var dataEntry = ThrowIfEntryNotFound(tempName, isDir: false);
+            var inode = _fsMan.GetInode(dataEntry.inodeGlobalIndex, out var bg);
+            return _fsMan.LoadFileStream(inode, access, transaction, this, bg);
+        }
+
+        public SimFileStream CreateFile(Transaction transaction, ReadOnlySpan<char> fileName, FileAccess access, int blockCount = -1)
         {
             ThrowsIfNotValid();
             if (blockCount <= 0)
@@ -209,23 +355,12 @@ namespace SimFS
             using var _ = TempName(fileName, out var tempName);
             ThrowIfEntryExists(tempName, isDir: false);
 
-            var childInode = _fsMan.AllocateInodeNear(_inodeGlobalIndex, InodeUsage.NormalFile, out var bg, blockCount);
-            AddEntry(tempName.ToString(), childInode);
-            return _fsMan.LoadFileStream(childInode, bg);
+            var childInode = _fsMan.AllocateInodeNear(transaction, _inodeGlobalIndex, InodeUsage.NormalFile, out var bg, blockCount);
+            AddEntry(transaction, tempName.ToString(), childInode);
+            return _fsMan.LoadFileStream(childInode, access, transaction, this, bg);
         }
 
-        public SimFileStream GetFile(ReadOnlySpan<char> fileName)
-        {
-            ThrowsIfNotValid();
-            ThrowsIfNameIsInvalid(fileName);
-            TryInitialize();
-            using var _ = TempName(fileName, out var tempName);
-            var dataEntry = ThrowIfEntryNotFound(tempName, isDir: false);
-            var inode = _fsMan.GetInode(dataEntry.inodeGlobalIndex, out var bg);
-            return _fsMan.LoadFileStream(inode, bg);
-        }
-
-        public SimFileStream GetOrCreateFile(ReadOnlySpan<char> fileName, int blockCount = -1)
+        public SimFileStream GetOrCreateFile(Transaction transaction, ReadOnlySpan<char> fileName, FileAccess access, int blockCount = -1)
         {
             if (blockCount <= 0)
                 blockCount = 1;
@@ -235,16 +370,16 @@ namespace SimFS
             using var _ = TempName(fileName, out var tempName);
             if (!TryGetEntry(tempName, isDir: false, out var entry))
             {
-                var childInode = _fsMan.AllocateInodeNear(_inodeGlobalIndex, InodeUsage.NormalFile, out var bg1, blockCount);
-                AddEntry(tempName.ToString(), childInode);
-                return _fsMan.LoadFileStream(childInode, bg1);
+                var childInode = _fsMan.AllocateInodeNear(transaction, _inodeGlobalIndex, InodeUsage.NormalFile, out var bg1, blockCount);
+                AddEntry(transaction, tempName.ToString(), childInode);
+                return _fsMan.LoadFileStream(childInode, access, transaction, this, bg1);
             }
 
             var inode = _fsMan.GetInode(entry.inodeGlobalIndex, out var bg);
-            return _fsMan.LoadFileStream(inode, bg);
+            return _fsMan.LoadFileStream(inode, access, transaction, this, bg);
         }
 
-        public bool TryGetFile(ReadOnlySpan<char> fileName, out SimFileStream fileStream)
+        public bool TryGetFile(Transaction transaction, ReadOnlySpan<char> fileName, FileAccess access, out SimFileStream fileStream)
         {
             ThrowsIfNotValid();
             ThrowsIfNameIsInvalid(fileName);
@@ -254,7 +389,7 @@ namespace SimFS
             if (!TryGetEntry(tempName, isDir: false, out var entry))
                 return false;
             var inode = _fsMan.GetInode(entry.inodeGlobalIndex, out var bg);
-            fileStream = _fsMan.LoadFileStream(inode, bg);
+            fileStream = _fsMan.LoadFileStream(inode, access, transaction, this, bg);
             return true;
         }
 
@@ -267,7 +402,7 @@ namespace SimFS
             using var __ = TempName(fileName, out var tempName);
             var dataEntry = ThrowIfEntryNotFound(tempName, isDir: false, out var entryIndex);
             var inode = _fsMan.GetInode(dataEntry.inodeGlobalIndex, out _);
-            return new SimFileInfo(_fsMan, _names[entryIndex], inode);
+            return new SimFileInfo(_fsMan, _names[entryIndex], this, inode);
         }
 
         public bool TryGetFileInfo(ReadOnlySpan<char> fileName, out SimFileInfo info)
@@ -281,15 +416,15 @@ namespace SimFS
             if (!TryGetEntry(tempName, isDir: false, out var dataEntry, out var entryIndex))
                 return false;
             var inode = _fsMan.GetInode(dataEntry.inodeGlobalIndex, out _);
-            info = new SimFileInfo(_fsMan, _names[entryIndex], inode);
+            info = new SimFileInfo(_fsMan, _names[entryIndex], this, inode);
             return true;
         }
 
-        public ReadOnlyMemory<char>[] GetFiles(PathKind pathKind = PathKind.Relative, bool topDirectoryOnly = true)
+        public ReadOnlyMemory<char>[] GetFiles(OutPathKind pathKind = OutPathKind.Relative, bool topDirectoryOnly = true)
         {
             if (topDirectoryOnly)
             {
-                if (pathKind == PathKind.Relative)
+                if (pathKind == OutPathKind.Relative)
                     return Files.ToArray();
                 var basePaths = SimUtil.Path.PathSegmentsHolder;
                 GetFullNameSegments(basePaths);
@@ -299,18 +434,18 @@ namespace SimFS
             {
                 var list = new List<ReadOnlyMemory<char>>();
                 var basePaths = SimUtil.Path.PathSegmentsHolder;
-                if (pathKind == PathKind.Absolute)
+                if (pathKind == OutPathKind.Absolute)
                     GetFullNameSegments(basePaths);
                 GetAllChildren(basePaths, this, list, SimFSType.File);
                 return list.ToArray();
             }
         }
 
-        public void GetFiles(ICollection<ReadOnlyMemory<char>> paths, PathKind pathKind = PathKind.Relative, bool topDirectoryOnly = true)
+        public void GetFiles(ICollection<ReadOnlyMemory<char>> paths, OutPathKind pathKind = OutPathKind.Relative, bool topDirectoryOnly = true)
         {
             if (topDirectoryOnly)
             {
-                if (pathKind == PathKind.Relative)
+                if (pathKind == OutPathKind.Relative)
                 {
                     foreach (var file in Files)
                     {
@@ -328,7 +463,7 @@ namespace SimFS
             else
             {
                 var basePaths = SimUtil.Path.PathSegmentsHolder;
-                if (pathKind == PathKind.Absolute)
+                if (pathKind == OutPathKind.Absolute)
                     GetFullNameSegments(basePaths);
                 GetAllChildren(basePaths, this, paths, SimFSType.File);
             }
@@ -343,16 +478,6 @@ namespace SimFS
             return TryGetEntry(tempName, true, out _, out _);
         }
 
-        public SimDirectory CreateDirectory(ReadOnlySpan<char> dirName)
-        {
-            ThrowsIfNotValid();
-            ThrowsIfNameIsInvalid(dirName);
-            TryInitialize();
-            using var _ = TempName(dirName, out var tempName);
-            ThrowIfEntryExists(tempName, isDir: true);
-            return CreateDirectoryNoCheck(tempName);
-        }
-
         public SimDirectory GetDirectory(ReadOnlySpan<char> dirName)
         {
             ThrowsIfNotValid();
@@ -361,10 +486,20 @@ namespace SimFS
 
             using var _ = TempName(dirName, out var tempName);
             var entryData = ThrowIfEntryNotFound(tempName, isDir: true, out var entryIndex);
-            return GetDirectory(tempName, entryData, entryIndex);
+            return GetDirectory(entryData, entryIndex);
         }
 
-        public SimDirectory GetOrCreateDirectory(ReadOnlySpan<char> dirName)
+        public SimDirectory CreateDirectory(Transaction transaction, ReadOnlySpan<char> dirName)
+        {
+            ThrowsIfNotValid();
+            ThrowsIfNameIsInvalid(dirName);
+            TryInitialize();
+            using var _ = TempName(dirName, out var tempName);
+            ThrowIfEntryExists(tempName, isDir: true);
+            return CreateDirectoryNoCheck(transaction, tempName);
+        }
+
+        public SimDirectory GetOrCreateDirectory(Transaction transaction, ReadOnlySpan<char> dirName)
         {
             ThrowsIfNotValid();
             ThrowsIfNameIsInvalid(dirName);
@@ -372,29 +507,30 @@ namespace SimFS
             using var _ = TempName(dirName, out var tempName);
             if (!TryGetEntry(tempName, isDir: true, out var entry, out var entryIndex))
             {
-                return CreateDirectoryNoCheck(tempName);
+                return CreateDirectoryNoCheck(transaction, tempName);
             }
 
-            return GetDirectory(tempName, entry, entryIndex);
+            return GetDirectory(entry, entryIndex);
         }
 
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private SimDirectory CreateDirectoryNoCheck(ReadOnlyMemory<char> dirName)
+        private SimDirectory CreateDirectoryNoCheck(Transaction transaction, ReadOnlyMemory<char> dirName)
         {
             var nameClone = dirName.ToString();
-            var childInode = _fsMan.AllocateInodeNear(_inodeGlobalIndex, InodeUsage.Directory, out var bg);
-            var dir = LoadSubDirectory(childInode, bg, nameClone.AsMemory());
-            AddEntry(nameClone, childInode);
+            //SimLog.Log($"creating new dir: {nameClone}");
+            var childInode = _fsMan.AllocateInodeNear(transaction, _inodeGlobalIndex, InodeUsage.Directory, out var bg);
+            var entryIndex = AddEntry(transaction, nameClone, childInode);
+            var dir = LoadSubDirectory(childInode, bg, nameClone.AsMemory(), entryIndex);
             return dir;
         }
 
 
-        public ReadOnlyMemory<char>[] GetDirectories(PathKind pathKind = PathKind.Relative, bool topDirectoryOnly = true)
+        public ReadOnlyMemory<char>[] GetDirectories(OutPathKind pathKind = OutPathKind.Relative, bool topDirectoryOnly = true)
         {
             if (topDirectoryOnly)
             {
-                if (pathKind == PathKind.Relative)
+                if (pathKind == OutPathKind.Relative)
                     return SubDirectories.ToArray();
                 var basePaths = SimUtil.Path.PathSegmentsHolder;
                 GetFullNameSegments(basePaths);
@@ -404,18 +540,18 @@ namespace SimFS
             {
                 var list = new List<ReadOnlyMemory<char>>();
                 var basePaths = SimUtil.Path.PathSegmentsHolder;
-                if (pathKind == PathKind.Absolute)
+                if (pathKind == OutPathKind.Absolute)
                     GetFullNameSegments(basePaths);
                 GetAllChildren(basePaths, this, list, SimFSType.Directory);
                 return list.ToArray();
             }
         }
 
-        public void GetDirectories(ICollection<ReadOnlyMemory<char>> paths, PathKind pathKind = PathKind.Relative, bool topDirectoryOnly = true)
+        public void GetDirectories(ICollection<ReadOnlyMemory<char>> paths, OutPathKind pathKind = OutPathKind.Relative, bool topDirectoryOnly = true)
         {
             if (topDirectoryOnly)
             {
-                if (pathKind == PathKind.Relative)
+                if (pathKind == OutPathKind.Relative)
                 {
                     foreach (var subDir in SubDirectories)
                     {
@@ -433,7 +569,7 @@ namespace SimFS
             else
             {
                 var basePaths = SimUtil.Path.PathSegmentsHolder;
-                if (pathKind == PathKind.Absolute)
+                if (pathKind == OutPathKind.Absolute)
                     GetFullNameSegments(basePaths);
                 GetAllChildren(basePaths, this, paths, SimFSType.Directory);
             }
@@ -457,34 +593,35 @@ namespace SimFS
             dir = null;
             if (!TryGetEntry(tempName, isDir: true, out var dataEntry, out var entryIndex))
                 return false;
-            dir = GetDirectory(tempName, dataEntry, entryIndex);
+            dir = GetDirectory(dataEntry, entryIndex);
             return true;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private SimDirectory LoadSubDirectory(InodeInfo inode, BlockGroup bg, ReadOnlyMemory<char> name)
+        private SimDirectory LoadSubDirectory(InodeInfo inode, BlockGroup bg, ReadOnlyMemory<char> name, int entryIndex)
         {
             var dir = _fsMan.Pooling.DirectoryPool.Get();
-            dir.LoadInfo(_fsMan, this, inode, bg, name);
-            _loadedDirectories[name] = dir;
+            dir.LoadInfo(_fsMan, this, inode, bg, name, entryIndex);
+            _loadedDirectories[entryIndex] = dir;
             return dir;
         }
 
 
-        private SimDirectory GetDirectory(ReadOnlyMemory<char> dirName, DirectoryEntryData entryData, int entryIndex)
+        private SimDirectory GetDirectory(DirectoryEntryData entryData, int entryIndex)
         {
-            if (!_loadedDirectories.TryGetValue(dirName, out var subDir))
+            if (!_loadedDirectories.TryGetValue(entryIndex, out var subDir))
             {
                 var inode = _fsMan.GetInode(entryData.inodeGlobalIndex, out var bg);
                 var name = _names[entryIndex];
-                subDir = LoadSubDirectory(inode, bg, name);
+                subDir = LoadSubDirectory(inode, bg, name, entryIndex);
             }
             return subDir;
         }
 
-        private void AddEntry(string name, InodeInfo inode)
+        private int AddEntry(Transaction transaction, string name, InodeInfo inode)
         {
             inode.ThrowsIfNotValid();
+            transaction.DirectoryBeforeChange(this, _entries.Count);
             var (inodeGlobalIndex, inodeData) = inode;
             var nameSpan = name.AsSpan();
             var entryLength = DirectoryEntryData.GetEntryLength(nameSpan.Length);
@@ -508,6 +645,7 @@ namespace SimFS
             if (entryIndex >= 0)
             {
                 entryData = _entries[entryIndex];
+                transaction.DirectoryBeforeChange(this, entryIndex, entryData, _names[entryIndex]);
                 entryData.ThrowsIfNotEmpty();
                 entryData = entryData.ReUse(nameSpan.Length, inodeGlobalIndex, inodeData.usage);
                 entryData.ThrowsIfNotValid();
@@ -518,18 +656,29 @@ namespace SimFS
             {
                 entryIndex = _entries.Count;
                 entryData = new DirectoryEntryData(entryLength, nameSpan.Length, inodeGlobalIndex, inodeData.usage);
+                transaction.DirectoryBeforeChange(this, entryIndex, new DirectoryEntryData(entryLength, 0, inodeGlobalIndex, InodeUsage.Unused), nameMem);
                 entryData.ThrowsIfNotValid();
                 _entries.Add(entryData);
                 _names.Add(nameMem);
             }
-            _dirtyEntries.AddRange(entryIndex, 1);
             (entryData.usage == InodeUsage.Directory ? _dirs : _files).Add(nameMem, entryIndex);
+            return entryIndex;
         }
 
-        private void DeleteEntry(DirectoryEntryData entryData, int entryIndex, bool checkValid = true)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void DeleteEntry(Transaction transaction, DirectoryEntryData entryData, int entryIndex, bool checkValid)
         {
             if (checkValid)
                 entryData.ThrowsIfNotValid();
+            transaction.DirectoryBeforeChange(this, _entries.Count);
+            transaction.DirectoryBeforeChange(this, entryIndex, _entries[entryIndex], _names[entryIndex]);
+            _fsMan.FreeInode(transaction, entryData.inodeGlobalIndex);
+            DeleteEntryInternal(entryData, entryIndex);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void DeleteEntryInternal(DirectoryEntryData entryData, int entryIndex)
+        {
             _names[entryIndex] = default;
             entryData = entryData.Free();
             var index = _unusedEntries.IndexOf((entryData.entryLength, null), false);
@@ -545,21 +694,19 @@ namespace SimFS
                 list.Add(entryIndex);
             }
             _entries[entryIndex] = entryData;
-            _dirtyEntries.AddRange(entryIndex, 1);
         }
 
-
-        public bool TryDeleteFile(ReadOnlySpan<char> name)
+        public bool TryDeleteFile(Transaction transaction, ReadOnlySpan<char> name)
         {
-            return TryDelete(name, false);
+            return TryDelete(transaction, name, false);
         }
 
-        public bool TryDeleteDirectory(ReadOnlySpan<char> name)
+        public bool TryDeleteDirectory(Transaction transaction, ReadOnlySpan<char> name)
         {
-            return TryDelete(name, true);
+            return TryDelete(transaction, name, true);
         }
 
-        public bool TryDeleteChild(ReadOnlySpan<char> name)
+        public bool TryDeleteChild(Transaction transaction, ReadOnlySpan<char> name)
         {
             ThrowsIfNotValid();
             ThrowsIfNameIsInvalid(name);
@@ -568,12 +715,12 @@ namespace SimFS
             var entryIndex = GetEntryIndex(tempName, out _);
             if (entryIndex < 0)
                 return false;
-            Delete(tempName, entryIndex, true);
+            Delete(transaction, tempName, entryIndex, true);
             return true;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private bool TryDelete(ReadOnlySpan<char> name, bool isDir)
+        private bool TryDelete(Transaction transaction, ReadOnlySpan<char> name, bool isDir)
         {
             ThrowsIfNotValid();
             ThrowsIfNameIsInvalid(name);
@@ -581,50 +728,54 @@ namespace SimFS
             using var _ = TempName(name, out var tempName);
             if (!TryGetEntry(tempName, isDir, out var entryData, out var entryIndex))
                 return false;
-            Delete(tempName, entryIndex, true);
+            Delete(transaction, tempName, entryIndex, true);
             return true;
         }
 
-        private void Delete(ReadOnlyMemory<char> fileName, int entryIndex, bool alsoDeleteName)
+        private void Delete(Transaction transaction, ReadOnlyMemory<char> fileName, int entryIndex, bool alsoDeleteName)
         {
             if ((uint)entryIndex > (uint)_entries.Count)
                 throw new ArgumentOutOfRangeException(nameof(entryIndex));
             var entryData = _entries[entryIndex];
             if (entryData.usage == InodeUsage.Directory)
             {
-                var dir = GetDirectory(fileName, entryData, entryIndex);
-                dir.Clear();
-                dir.Dispose();
-                _loadedDirectories.Remove(fileName);
+                var dir = GetDirectory(entryData, entryIndex);
+                dir.Clear(transaction);
+                DeleteEntry(transaction, entryData, entryIndex, true);
+                dir.SetAsDeleted();
                 if (alsoDeleteName)
                     _dirs.Remove(fileName);
             }
-            else
+            else if (entryData.usage == InodeUsage.NormalFile)
             {
+                if (_fsMan.IsFileOpen(entryData.inodeGlobalIndex))
+                    throw new SimFSException(ExceptionType.UnableToDeleteFile, $"file: {BuildFullName(fileName.Span)} is still open");
+
+                DeleteEntry(transaction, entryData, entryIndex, true);
                 if (alsoDeleteName)
                     _files.Remove(fileName);
             }
-            _fsMan.FreeInode(entryData.inodeGlobalIndex);
-            DeleteEntry(entryData, entryIndex);
+            else
+                DeleteEntry(transaction, entryData, entryIndex, true);
         }
 
-        public void Clear()
+        public void Clear(Transaction transaction)
         {
             ThrowsIfNotValid();
             TryInitialize();
             foreach (var (name, i) in _dirs)
             {
-                Delete(name, i, false);
+                Delete(transaction, name, i, false);
             }
             _dirs.Clear();
             foreach (var (name, i) in _files)
             {
-                Delete(name, i, false);
+                Delete(transaction, name, i, false);
             }
             _files.Clear();
         }
 
-        public bool TryMoveChild(ReadOnlySpan<char> name, SimDirectory targetDir, ReadOnlySpan<char> targetName, bool overwrite)
+        public bool TryMoveChild(Transaction transaction, ReadOnlySpan<char> name, SimDirectory targetDir, ReadOnlySpan<char> targetName, bool overwrite)
         {
             ThrowsIfNotValid();
             ThrowsIfNameIsInvalid(name);
@@ -635,26 +786,26 @@ namespace SimFS
             if (entryIndex < 0)
                 return false;
             var entryData = _entries[entryIndex];
-            if (targetDir.MoveFrom(toName, entryData, overwrite))
+            if (targetDir.MoveFrom(transaction, toName, entryData, overwrite))
             {
-                Delete(fromName, entryIndex, true);
+                Delete(transaction, fromName, entryIndex, true);
                 return true;
             }
             return false;
         }
 
-        private bool MoveFrom(ReadOnlyMemory<char> name, DirectoryEntryData entryData, bool overwrite)
+        private bool MoveFrom(Transaction transaction, ReadOnlyMemory<char> name, DirectoryEntryData entryData, bool overwrite)
         {
             var entryIndex = GetEntryIndex(name, out _);
             if (entryIndex >= 0)
             {
                 if (overwrite)
-                    Delete(name, entryIndex, true);
+                    Delete(transaction, name, entryIndex, true);
                 else
                     return false;
             }
             var inode = _fsMan.GetInode(entryData.inodeGlobalIndex, out _);
-            AddEntry(name.ToString(), inode);
+            AddEntry(transaction, name.ToString(), inode);
             return true;
         }
 
@@ -747,7 +898,7 @@ namespace SimFS
         private void TryInitialize()
         {
             if (_disposed)
-                throw new SimFSException(ExceptionType.InternalError, "directory already disposed");
+                throw new SimFSException(ExceptionType.DirectoryAlreadyDisposed);
             if (_initialized)
                 return;
             _stream.Position = 0;
@@ -760,6 +911,8 @@ namespace SimFS
             while (read < length && _entries.Count < entryCount)
             {
                 var loopRead = _stream.Read(buffer[bytesLeft..]);
+                if (loopRead <= 0)
+                    throw new SimFSException(ExceptionType.InvalidDirectory, "directory length and entry count don't match.");
                 read += loopRead;
                 if (read <= 0)
                     break;
@@ -768,117 +921,264 @@ namespace SimFS
                 do
                 {
                     readBuffer = readBuffer[dirRead..];
-                    if (readBuffer.Length <= 0)
+                    if (readBuffer.Length <= 1)
                         break;
-                    dirRead = ReadEntry(readBuffer);
-                    if (_entries.Count == entryCount)
-                        break;
+                    dirRead = DirectoryEntryData.ReadFromBuffer(readBuffer, out var entry, out var name);
+                    if (dirRead > 0)
+                    {
+                        _names.Add(name.AsMemory());
+                        _entries.Add(entry);
+                        if (_entries.Count == entryCount)
+                            break;
+                    }
                 } while (dirRead > 0);
                 bytesLeft = readBuffer.Length;
                 readBuffer.CopyTo(buffer);
             }
-            //_originalLength = 0;
             for (var i = 0; i < _entries.Count; i++)
             {
                 var entry = _entries[i];
                 var name = _names[i];
                 if (entry.usage == InodeUsage.Unused)
                 {
-                    DeleteEntry(entry, i, false);
+                    DeleteEntryInternal(entry, i);
                     continue;
                 }
                 if (entry.usage == InodeUsage.Directory)
                     _dirs.Add(name, i);
                 else
                     _files.Add(name, i);
-                //_originEndPos += entry.entryLength;
             }
-            //_originalLength = _entries.Count;
             _initialized = true;
         }
 
-        private int ReadEntry(ReadOnlySpan<byte> buffer)
+        private void SetAsDeleted()
         {
-            var entryLength = buffer[0];
-            if (buffer.Length < entryLength)
-                return 0;
-            var nameLength = buffer[1];
-            var usage = (InodeUsage)buffer[2];
-            var inodeLocation = BitConverter.ToInt32(buffer[3..]);
-            var nameBytes = buffer.Slice(7, nameLength);
-
-            var name = usage > InodeUsage.Unused ? Encoding.UTF8.GetString(nameBytes[..nameLength]) : null;
-            _names.Add(name.AsMemory());
-            var entry = new DirectoryEntryData(entryLength, nameLength, inodeLocation, usage);
-            _entries.Add(entry);
-
-            return entryLength;
-        }
-
-        private void WriteEntry(int position, ReadOnlyMemory<char> name, DirectoryEntryData entryData)
-        {
-            _stream.Position = position;
-            using var bufferHolder = _fsMan.Pooling.RentBuffer(out var span, entryData.entryLength);
-            span = span[..entryData.entryLength];
-            span[0] = entryData.entryLength;
-            span[1] = (byte)Encoding.UTF8.GetBytes(name.Span, span[7..]);
-            span[2] = (byte)entryData.usage;
-            BitConverter.TryWriteBytes(span[3..], entryData.inodeGlobalIndex);
-            _stream.Write(span);
-        }
-
-        public bool SaveChanges()
-        {
-            var result = SelfSaveChanges();
-            foreach (var (_, subDir) in _loadedDirectories)
+            if (_stream != null)
             {
-                result |= subDir.SaveChanges();
+                _stream.Dispose();
+                _stream = null;
             }
-            return result;
+            _inode = default;
+            _deleted = true;
         }
 
-        private bool SelfSaveChanges()
+        public void RevertChanges(int transactionId)
         {
-            if (_dirtyEntries.Count <= 0)
-                return false;
-            Span<byte> entryCountSpan = stackalloc byte[4];
-            _stream.Position = 0;
-            BitConverter.TryWriteBytes(entryCountSpan, _entries.Count);
-            _stream.Position = 0;
-            _stream.Write(entryCountSpan);
-
-            var pos = 4;
-            var curIndex = 0;
-            foreach (var (start, length) in _dirtyEntries)
+            if (transactionData == null)
+                return;
+            if (!transactionData.TryGetValue(transactionId, out var selfTransData))
+                return;
+            ThrowsIfNotValid();
+            if (_deleted)
             {
-                while (curIndex < start)
+                var inodeInfo = _fsMan.GetInode(_inodeGlobalIndex, out var bg);
+                _inode = inodeInfo.data;
+                _stream = _fsMan.DangerouslyLoadFileStream(inodeInfo, FileAccess.ReadWrite, null, this, bg);
+                _deleted = false;
+            }
+
+            RevertEntryChanges(selfTransData);
+
+            DisposeTransactionData(transactionId);
+        }
+
+        private void RevertEntryChanges(DirectoryTransactionData selfTransData)
+        {
+            var entryCount = selfTransData.originEntryCount;
+            if (entryCount < 0)
+            {
+                if ((selfTransData.entryChanges?.Count ?? 0) > 0)
+                    throw new SimFSException(ExceptionType.InternalError, "entryCount < 0 but entryChanges > 0");
+                return;
+            }
+            //SimLog.Log($"folder reverting: {BuildFullName()}");
+            foreach (var (_, indicies) in _unusedEntries)
+            {
+                var len = indicies.Count;
+                while (len-- > 0)
                 {
-                    pos += _entries[curIndex].entryLength;
-                    curIndex++;
-                }
-                for (; curIndex < start + length; curIndex++)
-                {
-                    var entry = _entries[curIndex];
-                    var name = _names[curIndex];
-                    WriteEntry(pos, name, entry);
-                    pos += entry.entryLength;
+                    if (indicies[len] >= entryCount)
+                        indicies.RemoveAt(len);
                 }
             }
-            _dirtyEntries.Clear();
-            return true;
+
+            if (selfTransData.entryChanges != null)
+            {
+                foreach (var (entryIndex, changeData) in selfTransData.entryChanges)
+                {
+                    var (data, name) = changeData;
+                    if (data.entryLength != _entries[entryIndex].entryLength)
+                        throw new SimFSException(ExceptionType.InternalError, "directory entry length doesn't match");
+                    var newData = _entries[entryIndex];
+                    if (newData.usage == InodeUsage.Directory)
+                    {
+                        if (_loadedDirectories.TryGetValue(entryIndex, out var subDir))
+                        {
+                            //SimLog.Log($"reverting dir: {subDir.Name}, inode: {subDir._inodeGlobalIndex}");
+                            subDir.SetAsDeleted();
+                            subDir.Dispose();
+                            _loadedDirectories.Remove(entryIndex);
+                        }
+                    }
+                    if (entryIndex >= entryCount)
+                        continue;
+                    _entries[entryIndex] = data;
+                    _names[entryIndex] = name;
+                }
+            }
+
+            while (_entries.Count > entryCount)
+            {
+                _entries.RemoveAt(_entries.Count - 1);
+                _names.RemoveAt(_names.Count - 1);
+            }
+
+            _dirs.Clear();
+            _files.Clear();
+            _unusedEntries.Clear();
+            for (var index = 0; index < _entries.Count; index++)
+            {
+                var entry = _entries[index];
+                switch (entry.usage)
+                {
+                    case InodeUsage.Unused:
+                        DeleteEntryInternal(entry, index);
+                        break;
+                    case InodeUsage.Directory:
+                        _dirs.Add(_names[index], index);
+                        break;
+                    case InodeUsage.TinyFile:
+                    case InodeUsage.NormalFile:
+                        _files.Add(_names[index], index);
+                        break;
+                }
+            }
+        }
+
+        public void SaveChangesFillChildren(int TransactionId, List<(SimDirectory, bool)> stack)
+        {
+            if (transactionData == null)
+                return;
+            if (!transactionData.TryGetValue(TransactionId, out var selfTransData) || selfTransData.childrenChanges == null)
+                return;
+            foreach (var childEntryIndex in selfTransData.childrenChanges)
+            {
+                if (!_loadedDirectories.TryGetValue(childEntryIndex, out var subDir))
+                    throw new SimFSException(ExceptionType.DirectoryNotFound, $"cannot apply changes to index: {childEntryIndex} of dir: {BuildFullName()}");
+                stack.Add((subDir, false));
+            }
+        }
+
+        public void SaveChanges(Transaction transaction, RangeList dirtyEntries)
+        {
+            if (transaction == null)
+                throw new ArgumentNullException(nameof(transaction));
+            if (dirtyEntries == null)
+                throw new ArgumentNullException(nameof(dirtyEntries));
+            if (transactionData == null)
+                return;
+
+            if (!_deleted)
+            {
+                if (transactionData.TryGetValue(transaction.ID, out var selfTransData) && selfTransData.entryChanges != null)
+                {
+                    foreach (var (index, _) in selfTransData.entryChanges)
+                    {
+                        dirtyEntries.AddRange(index, 1);
+                    }
+                }
+                if (dirtyEntries.Count <= 0)
+                    return;
+
+                Span<byte> entryCountSpan = stackalloc byte[4];
+                BitConverter.TryWriteBytes(entryCountSpan, _entries.Count);
+                _stream.Position = 0;
+                _stream.WithTransaction(transaction);
+                _stream.Write(entryCountSpan);
+
+                var pos = 4;
+                var curIndex = 0;
+                using (var bufferHolder = _fsMan.Pooling.RentBuffer(out var buffer, 256))
+                {
+                    foreach (var (start, length) in dirtyEntries)
+                    {
+                        while (curIndex < start)
+                        {
+                            pos += _entries[curIndex].entryLength;
+                            curIndex++;
+                        }
+                        for (; curIndex < start + length; curIndex++)
+                        {
+                            var entry = _entries[curIndex];
+                            var name = _names[curIndex];
+                            DirectoryEntryData.WriteToBuffer(buffer, entry, name);
+                            _stream.Position = pos;
+                            _stream.Write(buffer[..entry.entryLength]);
+
+                            //if (entry.usage == InodeUsage.Directory)
+                            //{
+                            //    SimLog.Log($"applying dir: {name}");
+                            //}
+
+                            if (entry.usage == InodeUsage.Unused && _loadedDirectories.TryGetValue(curIndex, out var subDir))
+                            {
+                                subDir.Dispose();
+                                _loadedDirectories.Remove(curIndex);
+                            }
+
+                            pos += entry.entryLength;
+                        }
+                    }
+                }
+                _stream.ClearTransaction();
+            }
+            DisposeTransactionData(transaction.ID);
+        }
+
+        private void DisposeTransactionData(int transactionId)
+        {
+            if (transactionData == null)
+                return;
+            if (!transactionData.TryGetValue(transactionId, out var selfTransData))
+                return;
+
+            var tp = _fsMan.Pooling.TransactionPooling;
+
+            selfTransData.Dispose(tp);
+            tp.DirTransDataPool.Return(selfTransData);
+            transactionData.Remove(transactionId);
+
+            var parent = Parent;
+            var child = this;
+            while (parent != null && (parent.transactionData?.TryGetValue(transactionId, out var parentTransData) ?? false))
+            {
+                var childrenChanges = parentTransData.childrenChanges;
+                if (childrenChanges == null)
+                    break;
+                childrenChanges.Remove(child.Index);
+                if (childrenChanges.Count > 0)
+                    break;
+                child = parent;
+                parent = child.Parent;
+            }
         }
 
         public void Dispose()
         {
-            ThrowsIfNotValid();
+            if (IsDirty)
+                throw new SimFSException(ExceptionType.UnsaveChangesMade, BuildFullName().ToString());
+            ThrowsIfNotValid(true, false);
             foreach (var (_, dir) in _loadedDirectories)
             {
                 dir.Dispose();
             }
             _loadedDirectories.Clear();
-            SelfSaveChanges();
-            _stream.Dispose();
-            _stream = null;
+            if (_stream != null)
+            {
+                _stream.Dispose();
+                _stream = null;
+            }
             foreach (var (_, list) in _unusedEntries)
             {
                 _fsMan.Pooling.IntListPool.Return(list);
@@ -887,84 +1187,7 @@ namespace SimFS
             _fsMan.Pooling.DirectoryPool.Return(this);
         }
 
-        private void TrimLoadedDirectories()
-        {
-            // this is my self made "algorithm" of trimming the directories, probably performs badly,
-            // but "should" smarter than just trimming from the top
-            var targetTrimNum = _fsMan.Customizer.MaxCachedDirectoires / 10;
-            var trimCount = 0;
-            // first find out current dir chain
-            _trimTempList.Clear();
-            var parent = this;
-            do
-            {
-                _trimTempList.Add(parent);
-                parent = parent.Parent;
-            }
-            while (parent != null);
-            _trimTempList.Reverse();
-            // start from the middle, why from the middle, 
-            //   1. the top directories probably have the fewest folders, and the revisit chances are high.
-            //   2. the bottom directoires may have the most folders, but the revisit chances are even higher.
-            var maxLoop = 1000;
-            var middlePt = 0;
-            while (maxLoop-- > 0)
-            {
-                var loopStart = 0;
-                middlePt = loopStart + (_trimTempList.Count - loopStart) / 2;
-                var tempMiddleIndex = middlePt;
-                var middleLoadedNum = 0;
-                // from the middle and step back to top to make sure we have the one that has the most loaded directories.
-                // the more loaded directories means the less important the sub-directories are.
-                // by this method, we can find out maybe the root directory containes the most loaded directoires.
-                for (var i = tempMiddleIndex; i >= 0; i--)
-                {
-                    var tempDir = _trimTempList[i];
-                    var count = tempDir._loadedDirectories.Count;
-                    if (count > middleLoadedNum)
-                    {
-                        middlePt = i;
-                        middleLoadedNum = count;
-                    }
-                }
-                // if the dirs from top to middlePt only contains 1 child, it means this directory chain is too long,
-                // and this directory tree didn't start to branch out on middlePt,
-                // so now we should start from middlePt and test again, until either:
-                //   a. _trimTempList.Count - middlePt <= 2
-                //   b. middleLoadedNum > 1
-                if (middleLoadedNum <= 1)
-                {
-                    loopStart = middlePt;
-                    if (loopStart >= _trimTempList.Count - 1)
-                        break;
-                }
-                else
-                    break;
-            }
-            // 4. now let's walk from the appropriate point to the end and trim all the "hopefully will never revisit again" dirs.
-            // why (count - 1)? because the last one is itself.
-            var keysList = new List<ReadOnlyMemory<char>>();
-            for (; middlePt < _trimTempList.Count - 1; middlePt++)
-            {
-                var loadedDirs = _trimTempList[middlePt]._loadedDirectories;
-                keysList.AddRange(loadedDirs.Select(x => x.Key));
-                var childDir = _trimTempList[middlePt + 1];
-                foreach (var key in keysList)
-                {
-                    if (NameComparer.Ordinal.Equals(key, childDir.Name))
-                        continue;
-                    var num = _fsMan.loadedDirectories;
-                    loadedDirs[key].Dispose();
-                    loadedDirs.Remove(key);
-                    trimCount += num - _fsMan.loadedDirectories;
-                    if (trimCount >= targetTrimNum)
-                        return;
-                }
-                keysList.Clear();
-            }
-            throw new SimFSException(ExceptionType.InternalError, "unexpected behavior on directory triming");
-        }
-
+        #region Enumerables
         internal readonly struct KeyEnumerable : IEnumerable<ReadOnlyMemory<char>>
         {
             public KeyEnumerable(Dictionary<ReadOnlyMemory<char>, int> dict)
@@ -1071,5 +1294,6 @@ namespace SimFS
                 Current = null;
             }
         }
+        #endregion
     }
 }

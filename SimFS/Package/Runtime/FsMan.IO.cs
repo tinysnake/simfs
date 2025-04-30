@@ -10,27 +10,26 @@ namespace SimFS
     {
         private const int MIN_BUFFER_SIZE = 4096;
 
+        private readonly Stream _fs;
         private byte[] _inodeBitmapBuffer;
         private byte[] _blockBitmapBuffer;
         private InodeData[] _inodeTableBuffer;
-        private readonly Stream _fs;
-        private WriteBuffer _writeBuffer;
+        private Memory<byte> _smallBuffer;
         private byte _inodeSize;
-        private ReadWriteLock _rwLock;
 
-        public WriteBuffer WriteBuffer => _writeBuffer;
+        public byte InodeSize => _inodeSize;
 
-        private FSHead SetupFileSystem(FSHeadData data, int bufferSize)
+        private FSHead SetupFileSystem(FSHeadData data)
         {
-            if (bufferSize < 1024)
-                throw new ArgumentException("bufferSize too small");
-            bufferSize = Math.Max(bufferSize, Math.Max(MIN_BUFFER_SIZE, data.blockSize * 8));
-            _writeBuffer = new WriteBuffer(bufferSize, _fs, _rwLock);
             CheckFileEmpty();
             data.ThrowIfNotValid();
             WriteHead(data);
             var head = new FSHead(data);
             _inodeSize = (byte)InodeData.GetInodeSize(head.InodeBlockPointersCount, head.AttributeSize);
+            //if (_inodeSize > _internalBuffer.Size)
+            //    _internalBuffer = new BufferProvider(_inodeSize);
+            if (_smallBuffer.IsEmpty || _smallBuffer.Length < _inodeSize)
+                _smallBuffer = new byte[_inodeSize];
             InitBlockGroupBuffer(head);
             return head;
         }
@@ -50,7 +49,8 @@ namespace SimFS
             _inodeBitmapBuffer = new byte[blockSize];
             _blockBitmapBuffer = new byte[blockSize];
             _inodeTableBuffer = new InodeData[BlockGroup.GetInodeTableItemsCount(blockSize)];
-            Pooling.MaxBufferSize = Math.Min(MIN_BUFFER_SIZE, blockSize * 8);
+
+            Pooling.UpdateBlockSize(blockSize);
             Pooling.BlockPointersCount = head.InodeBlockPointersCount;
             Pooling.AttributeSize = head.AttributeSize;
         }
@@ -79,24 +79,24 @@ namespace SimFS
                 throw new SimFSException(ExceptionType.UnknownFileFormat);
             }
             var bufferSize = Math.Min(MIN_BUFFER_SIZE, head.blockSize * 8);
-            if (_writeBuffer == null || bufferSize > _writeBuffer?.Size)
-            {
-                _writeBuffer = new WriteBuffer(bufferSize, _fs, _rwLock);
-            }
             _inodeSize = (byte)InodeData.GetInodeSize(head.inodeBlockPointersCount, head.attributeSize);
+            //if (_inodeSize > _internalBuffer.Size)
+            //    _internalBuffer = new BufferProvider(_inodeSize);
+            if (_smallBuffer.IsEmpty || _smallBuffer.Length < _inodeSize)
+                _smallBuffer = new byte[_inodeSize];
             return head;
         }
 
         private void WriteHead(FSHeadData head)
         {
-            _writeBuffer ??= new WriteBuffer(1024, _fs, _rwLock);
-            var section = _writeBuffer.Rent(0, FSHeadData.RESERVED_SIZE);
-            var bytes = section.bytes.Span;
+            var buffer = _smallBuffer.Span[..FSHeadData.RESERVED_SIZE];
+            var bytes = buffer;
             FSHeadData.SIGNATURE.CopyTo(bytes);
             bytes = bytes[FSHeadData.SIGNATURE.Length..];
             MemoryMarshal.Write(bytes, ref head);
             bytes = bytes[FSHeadData.MemSize..];
             bytes.Clear();
+            WriteRawData(0, buffer);
         }
 
         private void InitializeBlockGroup(BlockGroup bg, int blockGroupIndex, bool force)
@@ -105,12 +105,12 @@ namespace SimFS
             var pos = BlockGroup.GetBlockGroupLocation(blockGroupIndex, _head.BlockSize, _inodeSize);
             if (!force && _fs.Length > pos)
             {
-                CheckSpaceEmpty(pos);
+                CheckCanWriteBlockGroup(pos);
             }
             var blockSize = _head.BlockSize;
-            var section = _writeBuffer.Rent(pos, BlockGroupHead.RESERVED_SIZE);
-            var bytes = section.bytes.Span;
+            var bytes = _smallBuffer.Span[..BlockGroupHead.RESERVED_SIZE];
             BlockGroupHead.SIGNATURE.CopyTo(bytes);
+            WriteRawData(pos, bytes);
             var endOfBlock = pos + 8L * blockSize * blockSize;
             if (_fs.Length < endOfBlock)
                 _fs.SetLength(endOfBlock);
@@ -133,7 +133,6 @@ namespace SimFS
             var blockSize = _head.BlockSize;
             var loc = BlockGroup.GetBlockGroupLocation(blockGroupIndex, blockSize, _inodeSize);
             var gh = ReadBlockGroupHeadOnLocation(loc);
-            using var _ = ReadWriteLocker.BeginRead(_rwLock);
             _fs.Read(_blockBitmapBuffer);
             _fs.Read(_inodeBitmapBuffer);
             var inodeTableItemsCount = BlockGroup.GetInodeTableItemsCount(blockSize);
@@ -160,25 +159,27 @@ namespace SimFS
         public void UpdateBlockGroupMeta(BlockGroup bg)
         {
             var pos = BlockGroup.GetBlockGroupLocation(bg.GroupIndex, _head.BlockSize, _inodeSize);
-            var section = _writeBuffer.Rent(pos, BlockGroupHead.RESERVED_SIZE + bg.BlockBitmap.RawLength + bg.InodeBitmap.RawLength);
-            var buffer = section.bytes.Span;
-            var headBuffer = buffer[..BlockGroupHead.RESERVED_SIZE];
-            BlockGroupHead.SIGNATURE.CopyTo(headBuffer);
-            headBuffer = headBuffer[BlockGroupHead.SIGNATURE.Length..];
+            var totalSpan = _smallBuffer.Span[..BlockGroupHead.RESERVED_SIZE];
+            var headSpan = totalSpan;
+            BlockGroupHead.SIGNATURE.CopyTo(headSpan);
+            headSpan = headSpan[BlockGroupHead.SIGNATURE.Length..];
             var bgHead = bg.Head;
-            MemoryMarshal.Write(headBuffer, ref bgHead);
-            headBuffer = headBuffer[BlockGroupHead.MemSize..];
-            headBuffer.Clear();
-            buffer = buffer[BlockGroupHead.RESERVED_SIZE..];
-            var blockBimapBytes = bg.BlockBitmap.GetBytes().AsSpan();
-            blockBimapBytes.CopyTo(buffer);
-            buffer = buffer[blockBimapBytes.Length..];
+            MemoryMarshal.Write(headSpan, ref bgHead);
+            headSpan = headSpan[BlockGroupHead.MemSize..];
+            headSpan.Clear();
+            WriteRawData(pos, totalSpan);
+            pos += BlockGroupHead.RESERVED_SIZE;
+            var blockBitmapBytes = bg.BlockBitmap.GetBytes().AsSpan();
+            blockBitmapBytes.CopyTo(_blockBitmapBuffer);
+            WriteRawData(pos, _blockBitmapBuffer);
+            pos += _blockBitmapBuffer.Length;
             var inodeBitmapBytes = bg.InodeBitmap.GetBytes().AsSpan();
-            inodeBitmapBytes.CopyTo(buffer);
+            inodeBitmapBytes.CopyTo(_inodeBitmapBuffer);
+            WriteRawData(pos, _inodeBitmapBuffer);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private void CheckSpaceEmpty(long location)
+        private void CheckCanWriteBlockGroup(long location)
         {
             using var bufferHolder = Pooling.RentBuffer(out var span, BlockGroupHead.RESERVED_SIZE);
             _fs.Position = location;
@@ -187,14 +188,12 @@ namespace SimFS
             for (int i = 0; i < bytes.Length; i++)
             {
                 if (bytes[i] != 0)
-                    throw new SimFSException(ExceptionType.SpaceIsNotEmpty, $"the space now checking at location: 0x{location:X} is not empty");
+                    throw new SimFSException(ExceptionType.UnableToAllocateBlockGroup, $"the space now checking at location: 0x{location:X} is not empty");
             }
         }
 
         private BlockGroupHead ReadBlockGroupHeadOnLocation(long location)
         {
-            Flush();
-            using var _ = ReadWriteLocker.BeginRead(_rwLock);
             using var bufferHolder = Pooling.RentBuffer(out var span, BlockGroupHead.RESERVED_SIZE);
             _fs.Position = location;
             var bytes = span[..BlockGroupHead.RESERVED_SIZE];
@@ -219,8 +218,6 @@ namespace SimFS
 
         public InodeData ReadInode(ReadOnlySpan<byte> span)
         {
-            TryFlush();
-            using var _ = ReadWriteLocker.BeginRead(_rwLock);
             var length = BitConverter.ToInt32(span);
             span = span[4..];
             var usage = (InodeUsage)span[0];
@@ -243,12 +240,18 @@ namespace SimFS
                 return new InodeData(length, usage, attr.ToArray(), bpds);
         }
 
+        public void WriteInode(int inodeGlobalIndex, InodeData data)
+        {
+            var (bgIndex, inodeIndex) = GetLocalIndex(inodeGlobalIndex, _head.BlockSize);
+            WriteInode(bgIndex, inodeIndex, data);
+        }
+
         public void WriteInode(int blockGroupIndex, int inodeIndex, InodeData data)
         {
             var blockSize = _head.BlockSize;
-            var loc = BlockGroup.GetInodeLocation(blockGroupIndex, blockSize, _inodeSize, inodeIndex);
-            var sec = _writeBuffer.Rent(loc, _inodeSize);
-            var span = sec.bytes.Span;
+            var location = BlockGroup.GetInodeLocation(blockGroupIndex, blockSize, _inodeSize, inodeIndex);
+            var totalSpan = _smallBuffer.Span[.._inodeSize];
+            var span = totalSpan;
             BitConverter.TryWriteBytes(span, data.length);
             span = span[4..];
             BitConverter.TryWriteBytes(span, (byte)data.usage);
@@ -267,25 +270,29 @@ namespace SimFS
                     span = span[BlockPointerData.MemSize..];
                 }
             }
+            WriteRawData(location, totalSpan);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void WriteRawData(long fileLocation, ReadOnlySpan<byte> buffer)
+        {
+            _fs.Position = fileLocation;
+            _fs.Write(buffer);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public int ReadRawData(long fileLocation, Span<byte> buffer)
         {
-            TryFlush();
-            using var _ = ReadWriteLocker.BeginRead(_rwLock);
             _fs.Position = fileLocation;
             return _fs.Read(buffer);
         }
 
         public void Backup(Stream stream, Span<byte> buffer)
         {
+            if(_allocatedTransactions.Count>0)
+                throw new SimFSException(ExceptionType.UnsaveChangesMade, "Please commit all the transactions firsts.");
             if (stream == null || !stream.CanWrite)
                 throw new ArgumentException("stream is invalid");
-            if (_rwLock.State != ReadWriteState.None)
-                throw new InvalidOperationException("cannot backup file system while reading or writing data.");
-            SaveChanges();
-            using var _ = ReadWriteLocker.BeginRead(_rwLock);
             if (buffer.IsEmpty)
                 Pooling.RentBuffer(out buffer);
             _fs.Position = 0;
@@ -300,39 +307,8 @@ namespace SimFS
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private void TryFlush()
-        {
-            if (_rwLock.State == ReadWriteState.Reading)
-                return;
-            _writeBuffer.Flush();
-        }
-
-        public void Flush()
-        {
-            TryFlush();
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool SaveChanges()
-        {
-            if (_rwLock.State == ReadWriteState.Reading)
-                return false;
-
-            var result = true;
-            foreach (var (_, bg) in _loadedBlockGroups)
-            {
-                result |= bg.SaveChanges();
-            }
-
-            result |= _rootDirectory.SaveChanges();
-            TryFlush();
-            return result;
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void DisposeIO()
         {
-            _writeBuffer.Flush();
             _fs.Dispose();
         }
     }

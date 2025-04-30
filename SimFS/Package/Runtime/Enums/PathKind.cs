@@ -1,6 +1,6 @@
-﻿namespace SimFS
+namespace SimFS
 {
-    public enum PathKind : byte
+    public enum OutPathKind : byte
     {
         Relative,
         Absolute,

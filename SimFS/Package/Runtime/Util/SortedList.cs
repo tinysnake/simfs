@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace SimFS
 {
-    internal enum SortedListInsertPolicy
+    internal enum SortedListPolicy
     {
         AsIs,
         OnFirst,
@@ -29,13 +29,15 @@ namespace SimFS
         private readonly List<T> _list;
         private readonly IComparer<T> _comparer;
 
-        public SortedListInsertPolicy InsertPolicyOnSameOrder { get; set; }
+        public SortedListPolicy InsertPolicyOnSameOrder { get; set; }
 
         public T this[int index] => _list[index];
 
         T IList<T>.this[int index] { get => _list[index]; set => throw new System.NotSupportedException(); }
 
         public int Count => _list.Count;
+
+        public int Capacity { get => _list.Capacity; set => _list.Capacity = value; }
 
         int ICollection<T>.Count => _list.Count;
 
@@ -53,24 +55,96 @@ namespace SimFS
             var i = _list.BinarySearch(item, _comparer);
             if (i < 0)
                 return i;
-            return GetActualIndex(item, i);
+            return GetActualIndex(item, i, -1);
         }
 
-        private int GetActualIndex(T item, int index)
+        public int IndexOf(T item, bool exactMatch, SortedListPolicy policy)
         {
-            var left = index - 1;
-            while (left-- > 0)
+            return policy switch
             {
-                if (EqualityComparer<T>.Default.Equals(_list[left], item))
-                    return left;
-            }
-            do
+                SortedListPolicy.OnLast => IndexOf(item, exactMatch, 1),
+                _ => IndexOf(item, exactMatch, -1),
+            };
+        }
+
+        private int IndexOf(T item, bool exactMatch, int direction)
+        {
+            if (!exactMatch)
             {
-                if (EqualityComparer<T>.Default.Equals(_list[index], item))
-                    return index;
+                var index = _list.BinarySearch(item, _comparer);
+                if (direction < 0)
+                {
+                    while (index-- > 0)
+                    {
+                        if (_comparer.Compare(item, _list[index]) != 0)
+                            return index + 1;
+                    }
+                }
+                else
+                {
+                    while (++index < _list.Count) //without do-while here is to avoid testing the index again.
+                    {
+                        if (_comparer.Compare(item, _list[index]) != 0)
+                            return index - 1;
+                    }
+                }
+                return index;
             }
-            while (index++ < _list.Count - 1);
+            else
+            {
+                var i = _list.BinarySearch(item, _comparer);
+                if (i < 0)
+                    return i;
+                return GetActualIndex(item, i, direction);
+            }
+        }
+
+        private int GetActualIndex(T item, int index, int direction)
+        {
+            if (direction < 0)
+            {
+                var x = TestToTheLeft(item, index);
+                if (x >= 0)
+                    return x;
+                x = TestToTheRight(item, index);
+                if (x >= 0)
+                    return x;
+            }
+            else
+            {
+                var x = TestToTheRight(item, index);
+                if (x >= 0)
+                    return x;
+                x = TestToTheLeft(item, index);
+                if (x >= 0)
+                    return x;
+            }
             return -1;
+
+            int TestToTheLeft(T item, int i)
+            {
+                while (i-- > 0)
+                {
+                    if (EqualityComparer<T>.Default.Equals(_list[i], item))
+                        return i;
+                    if (_comparer.Compare(_list[index], item) != 0)
+                        break;
+                }
+                return -1;
+            }
+
+            int TestToTheRight(T item, int i)
+            {
+                do // do-while here is to exact test the index again.
+                {
+                    if (EqualityComparer<T>.Default.Equals(_list[i], item))
+                        return i;
+                    if (_comparer.Compare(_list[i], item) != 0)
+                        break;
+                }
+                while (++i < _list.Count);
+                return -1;
+            }
         }
 
         public void Add(T item)
@@ -84,8 +158,8 @@ namespace SimFS
             {
                 var flag = InsertPolicyOnSameOrder switch
                 {
-                    SortedListInsertPolicy.OnFirst => -1,
-                    SortedListInsertPolicy.OnLast => 1,
+                    SortedListPolicy.OnFirst => -1,
+                    SortedListPolicy.OnLast => 1,
                     _ => 0,
                 };
                 if (flag == 0)

@@ -15,7 +15,7 @@ namespace SimFS
                     to = chars.Length;
                 else
                     to += from;
-                if (!(removeEmptySegments && to - from <= 1))
+                if (!(removeEmptySegments && to - from < 1))
                 {
                     var range = new Range(from, to);
                     ranges[rangeIndex++] = range;

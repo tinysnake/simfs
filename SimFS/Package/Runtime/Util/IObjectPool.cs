@@ -5,5 +5,7 @@ namespace SimFS
         T Get();
         void Return(T obj);
         int MaxCapacity { get; set; }
+        bool HasItem { get; }
+        void Clear();
     }
 }

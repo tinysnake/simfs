@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 
 namespace SimFS
@@ -82,7 +83,6 @@ namespace SimFS
             else
                 InodeBitmap.Clear();
             _inodeTable ??= new InodeData[GetInodeTableItemsCount(_blockSize)];
-            _dirty = false;
         }
 
         public void Load(FSMan fsMan, int groupIndex, BlockGroupHead head, ReadOnlySpan<byte> blockBitmap, ReadOnlySpan<byte> inodeBitmap, ReadOnlySpan<InodeData> inodeData, byte inodeSize)
@@ -112,7 +112,6 @@ namespace SimFS
                 throw new SimFSException(ExceptionType.InconsistantDataValue, $"head.freeBlocks: {head.freeBlocks}, calculatedFreeBlocks: {freeBlocks}, " +
                     $"head.freeInodes: {head.freeInodes}, calculatedFreeInodes: {freeInodes}");
             }
-            _dirty = false;
         }
 
         internal BlockGroup()
@@ -123,7 +122,6 @@ namespace SimFS
         internal void InPool()
         {
             GroupIndex = -1;
-            _dirtyInodes.Clear();
             _fsMan = null;
         }
 
@@ -131,8 +129,6 @@ namespace SimFS
         private byte _inodeSize;
         private InodeData[] _inodeTable;
         private FSMan _fsMan;
-        private bool _dirty;
-        private readonly RangeList _dirtyInodes = new();
 
         public BlockGroupHead Head => new((ushort)BlockBitmap.FreeBits, (ushort)InodeBitmap.FreeBits);
         public int FreeBlocksCount => BlockBitmap.FreeBits;
@@ -151,48 +147,50 @@ namespace SimFS
             return new InodeInfo(globalIndex, data);
         }
 
-        public InodeInfo AllocateInode(InodeUsage usage, int attrSize)
+        public InodeInfo AllocateInode(Transaction transaction, InodeUsage usage, int attrSize)
         {
             if (InodeBitmap.FreeBits < 1)
                 throw new SimFSException(ExceptionType.NotEnoughBits, "not enough space to allocate inode");
+            SelfBeforeChange(transaction);
             var inodeIndex = InodeBitmap.Allocate(1);
+            //SimLog.Log("alloc inode: " + FSMan.GetGlobalIndex(GroupIndex, inodeIndex, _blockSize));
             var globalIndex = FSMan.GetGlobalIndex(GroupIndex, inodeIndex, _blockSize);
             var oldInodeData = _inodeTable[inodeIndex];
             InodeData inodeData;
             oldInodeData.ThrowsIfNotEmpty(globalIndex);
             inodeData = InodeData.Create(attrSize, usage, _fsMan.Pooling);
-            UpdateInodeInternal(inodeIndex, inodeData);
-            _dirty = true;
+            UpdateInodeInternal(transaction, inodeIndex, inodeData);
             return new InodeInfo(globalIndex, inodeData);
         }
 
-        public void UpdateInode(int globalIndex, InodeData inodeData)
+        public void UpdateInode(Transaction transaction, int globalIndex, InodeData inodeData)
         {
             var (bgIndex, inodeIndex) = FSMan.GetLocalIndex(globalIndex, _blockSize);
             if (bgIndex != GroupIndex)
                 throw new SimFSException(ExceptionType.BlockGroupNotTheSame, $"you're updating a inode from {bgIndex}, to {GroupIndex}");
             if (!InodeBitmap.Check(inodeIndex))
                 throw new SimFSException(ExceptionType.InconsistantDataValue, $"in bg:{GroupIndex}, the inode at: {inodeIndex} is not used, cannot update");
-            UpdateInodeInternal(inodeIndex, inodeData);
+            UpdateInodeInternal(transaction, inodeIndex, inodeData);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void UpdateInode(InodeInfo inode)
+        public void UpdateInode(Transaction transaction, InodeInfo inode)
         {
             var (gi, d) = inode;
-            UpdateInode(gi, d);
+            UpdateInode(transaction, gi, d);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private void UpdateInodeInternal(int inodeIndex, InodeData inodeData)
+        private void UpdateInodeInternal(Transaction transaction, int inodeIndex, InodeData inodeData)
         {
+            var globalIndex = FSMan.GetGlobalIndex(GroupIndex, inodeIndex, _blockSize);
+            transaction.InodeBeforeChange(globalIndex, _inodeTable[inodeIndex]);
             _inodeTable[inodeIndex] = inodeData;
-            _dirtyInodes.AddRange(inodeIndex, 1);
-            _dirty = true;
         }
 
-        public void FreeInode(int localIndex)
+        public void FreeInode(Transaction transaction, int localIndex)
         {
+            //SimLog.Log("free inode: " + FSMan.GetGlobalIndex(GroupIndex, localIndex, _blockSize));
             var inodeData = _inodeTable[localIndex];
             inodeData.ThrowsIfNotValid(GroupIndex, localIndex, _blockSize);
             foreach (var bpd in inodeData.blockPointers)
@@ -200,13 +198,13 @@ namespace SimFS
                 if (!bpd.IsEmpty)
                     throw new InvalidOperationException("you must free the blocks first");
             }
+            SelfBeforeChange(transaction);
             InodeBitmap.Free(localIndex, 1);
             inodeData = inodeData.Free(_fsMan.Pooling);
-            UpdateInodeInternal(localIndex, inodeData);
-            _dirty = true;
+            UpdateInodeInternal(transaction, localIndex, inodeData);
         }
 
-        public BlockPointerData AllocateBlock(int blockCount)
+        public BlockPointerData AllocateBlock(Transaction transaction, int blockCount)
         {
             if (blockCount <= 0)
                 blockCount = 1;
@@ -215,14 +213,14 @@ namespace SimFS
 
             if (BlockBitmap.FreeBits <= blockCount)
                 return default;
+            SelfBeforeChange(transaction);
             var blockIndex = BlockBitmap.Allocate(blockCount);
             if (blockIndex < 0)
                 return default;
-            _dirty = true;
             return new BlockPointerData(FSMan.GetGlobalIndex(GroupIndex, blockIndex, _blockSize), (byte)blockCount);
         }
 
-        public bool ExpandBlockUsage(ref BlockPointerData bpd, int blockCount)
+        public bool ExpandBlockUsage(Transaction transaction, ref BlockPointerData bpd, int blockCount)
         {
             if (blockCount <= 0 || blockCount > byte.MaxValue)
                 throw new ArgumentOutOfRangeException($"requesting {nameof(blockCount)} is too large than {byte.MaxValue}");
@@ -240,49 +238,64 @@ namespace SimFS
             if (!BlockBitmap.RangeCheck(blockIndex, bpd.blockCount, true))
                 throw new SimFSException(ExceptionType.InconsistantDataValue);
 #endif
+            SelfBeforeChange(transaction);
             if (BlockBitmap.ExpandAllocation(blockIndex + bpd.blockCount, blockCount))
             {
                 bpd = new BlockPointerData(bpd.globalIndex, (byte)(bpd.blockCount + blockCount));
-                _dirty = true;
                 return true;
             }
             return false;
         }
 
-        public void FreeBlocks(BlockPointerData bpd)
+        public int ExpandBlockUsageAtBest(Transaction transaction, ref BlockPointerData bpd, int maxBlocksCount)
+        {
+            if (maxBlocksCount < 0)
+                throw new ArgumentOutOfRangeException(nameof(maxBlocksCount));
+            if ((bpd.blockCount + maxBlocksCount) > byte.MaxValue)
+                throw new ArgumentOutOfRangeException($"requesting {nameof(maxBlocksCount)} + bpd.blockCount: {bpd.blockCount} is larger than {byte.MaxValue}");
+
+            var (bgIndex, blockIndex) = FSMan.GetLocalIndex(bpd.globalIndex, _blockSize);
+            if (bgIndex != GroupIndex)
+                throw new SimFSException(ExceptionType.BlockGroupNotTheSame, $"current block pointer is in group: {bgIndex}, but operating group is: {GroupIndex}");
+
+            if (BlockBitmap.FreeBits <= 0)
+                return 0;
+
+#if DEBUG
+            if (!BlockBitmap.RangeCheck(blockIndex, bpd.blockCount, true))
+                throw new SimFSException(ExceptionType.InconsistantDataValue);
+#endif
+            SelfBeforeChange(transaction);
+            var allocatedBlocks = BlockBitmap.ExpandAllocationAtBest(blockIndex + bpd.blockCount, maxBlocksCount);
+            if (allocatedBlocks > 0)
+                bpd = new BlockPointerData(bpd.globalIndex, (byte)(bpd.blockCount + allocatedBlocks));
+            return allocatedBlocks;
+        }
+
+        public void FreeBlocks(Transaction transaction, BlockPointerData bpd)
         {
             var (bgIndex, blockIndex) = FSMan.GetLocalIndex(bpd.globalIndex, _blockSize);
             if (bgIndex != GroupIndex)
                 throw new SimFSException(ExceptionType.BlockGroupNotTheSame, $"current blockGroup: {GroupIndex}, argument block group: {bgIndex}");
+            SelfBeforeChange(transaction);
             BlockBitmap.Free(blockIndex, bpd.blockCount);
         }
 
-        public void WriteContentByGlobalIndex(int blockGlobalIndex, int offset, ReadOnlySpan<byte> buffer)
+        public void WriteRawData(int blockIndex, int offset, ReadOnlySpan<byte> data)
         {
-            var (bgIndex, blockIndex) = FSMan.GetLocalIndex(blockGlobalIndex, _blockSize);
-            if (bgIndex != GroupIndex)
-                throw new SimFSException(ExceptionType.BlockGroupNotTheSame, $"current blockGroup: {GroupIndex}, argument block group: {bgIndex}");
-            WriteContent(blockIndex, offset, buffer);
-        }
-
-        public void WriteContent(int blockIndex, int offset, ReadOnlySpan<byte> buffer)
-        {
-            var totalBlockCount = SimUtil.Number.IntDivideCeil(offset + buffer.Length, _blockSize);
+            if (offset >= _blockSize)
+                throw new SimFSException(ExceptionType.InvalidBlockOffset, $"Offset: {offset}, BlockSize: {_blockSize}");
+            var totalBlockCount = SimUtil.Number.IntDivideCeil(offset + data.Length, _blockSize);
             if (blockIndex < 0)
-                throw new ArgumentOutOfRangeException(nameof(blockIndex));
+                throw new SimFSException(ExceptionType.BlockIndexOutOfRange, blockIndex.ToString());
             if (blockIndex + totalBlockCount >= BlockBitmap.Size)
-                throw new ArgumentOutOfRangeException($"blockIndex:{blockIndex} and its content blockCount: {totalBlockCount} will out of the block group's boundary");
+                throw new SimFSException(ExceptionType.BlockIndexOutOfRange, $"blockIndex:{blockIndex} and its content blockCount: {totalBlockCount} will out of the block group's boundary");
 #if DEBUG
             if (!BlockBitmap.RangeCheck(blockIndex, totalBlockCount, true))
                 throw new SimFSException(ExceptionType.NotAllocated, $"blockgroup: {GroupIndex}, blockIndex: {blockIndex}, check length: {totalBlockCount}");
 #endif
-            var writeBuffer = _fsMan.WriteBuffer;
-            if (buffer.Length > writeBuffer.Size)
-                throw new ArgumentException("buffer length is greater than SimIO.WriteBuffer.Size");
-
             var location = GetBlockLocation(GroupIndex, blockIndex, _blockSize, _inodeSize) + offset;
-            var section = writeBuffer.Rent(location, buffer.Length);
-            buffer.CopyTo(section.bytes.Span);
+            _fsMan.WriteRawData(location, data);
         }
 
         public int ReadContentByGlobalIndex(int blockGlobalIndex, int offset, Span<byte> buffer)
@@ -308,30 +321,56 @@ namespace SimFS
             return _fsMan.ReadRawData(location, buffer);
         }
 
-        public bool SaveChanges()
+        private void SelfBeforeChange(Transaction transaction)
         {
-            if (_dirtyInodes.Count <= 0)
-                return false;
-            if (_dirtyInodes.Count > 0)
+            transaction.BlockGroupBeforeChange(GroupIndex, InodeBitmap.GetBytes().AsSpan(), BlockBitmap.GetBytes().AsSpan());
+        }
+
+        public void SaveInodeChanges(Dictionary<int, InodeData> inodeChanges)
+        {
+            if (inodeChanges == null || inodeChanges.Count == 0)
+                return;
+            foreach (var (inodeIndex, _) in inodeChanges)
             {
-                foreach (var (start, length) in _dirtyInodes)
-                {
-                    for (var i = start; i < start + length; i++)
-                    {
-                        _fsMan.WriteInode(GroupIndex, i, _inodeTable[i]);
-                    }
-                }
+                //SimLog.Log("apply inode: " + FSMan.GetGlobalIndex(GroupIndex, inodeIndex, _blockSize));
+                _fsMan.WriteInode(GroupIndex, inodeIndex, _inodeTable[inodeIndex]);
             }
-            _dirtyInodes.Clear();
+        }
+
+        public void RevertInodeChanges(Dictionary<int, InodeData> inodeChanges)
+        {
+            if (inodeChanges == null || inodeChanges.Count == 0)
+                return;
+            foreach (var (inodeIndex, inodeData) in inodeChanges)
+            {
+                //SimLog.Log("revert inode: " + FSMan.GetGlobalIndex(GroupIndex, inodeIndex, _blockSize));
+                _inodeTable[inodeIndex] = inodeData;
+            }
+        }
+
+        public void SaveMetaChanges()
+        {
             _fsMan.UpdateBlockGroupMeta(this);
-            return true;
+        }
+
+        public void RevertMetaChanges(ReadOnlySpan<byte> blockBitmap, ReadOnlySpan<byte> inodeBitmap)
+        {
+            if (_blockSize > 0 && _blockSize != blockBitmap.Length)
+                throw new SimFSException(ExceptionType.InvalidBlockGroup, "trying to load blockgroup info to an instance with a different blockSize");
+
+            if (BlockBitmap == null)
+                BlockBitmap = new Bitmap(blockBitmap, _fsMan.Pooling.IntListPool);
+            else
+                BlockBitmap.ReInitialize(blockBitmap, _fsMan.Pooling.IntListPool);
+            if (InodeBitmap == null)
+                InodeBitmap = new Bitmap(inodeBitmap, _fsMan.Pooling.IntListPool);
+            else
+                InodeBitmap.ReInitialize(inodeBitmap, _fsMan.Pooling.IntListPool);
         }
 
         public void Dispose()
         {
             this.ThrowsIfNotValid();
-            if (_dirty)
-                SaveChanges();
             _fsMan.Pooling.BlockGroupPool.Return(this);
         }
     }

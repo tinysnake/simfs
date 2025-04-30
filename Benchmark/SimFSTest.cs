@@ -4,6 +4,7 @@ public class SimFSTest : IFileSystemTest
 {
     public SimFSTest(string filePath)
     {
+        filePath = Path.GetFullPath(filePath);
         if (File.Exists(filePath))
             File.Delete(filePath);
         _fb = new Filebase(filePath);
@@ -28,7 +29,7 @@ public class SimFSTest : IFileSystemTest
 
     public int ReadFile(string path, byte[] buffer)
     {
-        using var fs = _fb.OpenFile(path, OpenFileMode.Open);
+        using var fs = _fb.Open(path, OpenFileMode.Open);
         return fs.Read(buffer);
     }
 
@@ -39,10 +40,5 @@ public class SimFSTest : IFileSystemTest
         {
             _fb.Delete(file.Span);
         }
-    }
-
-    public void Flush()
-    {
-        _fb.Flush();
     }
 }

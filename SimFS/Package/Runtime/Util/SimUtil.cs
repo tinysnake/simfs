@@ -52,6 +52,51 @@ namespace SimFS
             {
                 return (dividend + divisor - 1) / divisor;
             }
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public static int BitLength(uint num)
+            {
+                switch (num)
+                {
+                    case 0: return 0;
+                    case 1: return 1;
+                    case 2: return 2;
+                }
+                var i = 2;
+                for (; i < 32; i++)
+                {
+                    var comp = 1 << i;
+                    if (num < comp)
+                        break;
+                }
+                return i;
+            }
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public static int Max<TCollection, TElem>(TCollection collection, Func<TElem, int> func)
+                where TCollection : IEnumerable<TElem>
+            {
+                var max = int.MinValue;
+                foreach (var elem in collection)
+                {
+                    var num = func(elem);
+                    if (num > max)
+                        max = num;
+                }
+                return max;
+            }
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public static int Sum<TCollection, TElem>(TCollection collection, Func<TElem, int> func)
+                where TCollection : IEnumerable<TElem>
+            {
+                var sum = 0;
+                foreach (var elem in collection)
+                {
+                    sum += func(elem);
+                }
+                return sum;
+            }
         }
     }
 
@@ -79,7 +124,10 @@ namespace SimFS
                     _pathBuilder.Append('/');
                 }
                 if (fileName.IsEmpty)
-                    _pathBuilder.Remove(_pathBuilder.Length - 1, 1);
+                {
+                    if (_pathBuilder.Length > 0)
+                        _pathBuilder.Remove(_pathBuilder.Length - 1, 1);
+                }
                 else
                     _pathBuilder.Append(fileName);
                 return _pathBuilder.ToString().AsMemory();

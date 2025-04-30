@@ -134,7 +134,12 @@ namespace SimFS
                 if (si < 0)
                     si = i;
 
-                if (cur == 0) continue;
+                if (cur == 0)
+                {
+                    if (sj < 0)
+                        sj = 0;
+                    continue;
+                }
 
                 for (var j = 0; j < 8; j++)
                 {
@@ -245,6 +250,8 @@ namespace SimFS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void AddLengthIndex(int length, int bitIndex)
         {
+            if (bitIndex < 0 || bitIndex > Size)
+                throw new SimFSException(ExceptionType.WrongBit, $"bitIndex: {bitIndex} is out of range");
             var lengthIndex = _fragIndicesByLen.IndexOf((length, null), false);
             if (lengthIndex < 0)
             {
@@ -272,6 +279,24 @@ namespace SimFS
                 _fragIndicesByLen.RemoveAt(lengthIndex);
                 _intListPool.Return(indices);
             }
+        }
+
+        public int ExpandAllocationAtBest(int blockIndex, int maxBlockCount)
+        {
+            if (maxBlockCount <= 0)
+                throw new ArgumentOutOfRangeException(nameof(maxBlockCount));
+            var end = Math.Min(blockIndex + maxBlockCount, Size);
+            var stepSize = maxBlockCount < 4 ? 1 : SimUtil.Number.BitLength((uint)maxBlockCount);
+            var i = blockIndex;
+            while (i < end)
+            {
+                var curStep = Math.Min(end - i, stepSize);
+                if (ExpandAllocation(i, curStep))
+                    i += curStep;
+                else
+                    break;
+            }
+            return i - blockIndex;
         }
 
         public bool ExpandAllocation(int blockIndex, int blockCount)

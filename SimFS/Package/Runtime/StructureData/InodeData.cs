@@ -84,7 +84,7 @@ namespace SimFS
         {
             if (blockPointers != null)
                 pool.BlockPointersPool.Return(blockPointers);
-            if (attributes != null)
+            if (attributes != null && attributes.Length > 0)
                 pool.AttributesPool.Return(attributes);
             return new InodeData(0, InodeUsage.Unused, null, null);
         }

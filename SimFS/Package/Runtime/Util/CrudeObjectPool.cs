@@ -23,6 +23,9 @@ namespace SimFS
 
         private readonly List<T> _list;
 
+
+        public bool HasItem => _list.Count > 0;
+
         public int MaxCapacity
         {
             get => _maxCapacity;
@@ -32,7 +35,18 @@ namespace SimFS
                     throw new System.ArgumentOutOfRangeException(nameof(value));
                 _maxCapacity = value;
                 if (_maxCapacity < _list.Count)
-                    _list.RemoveRange(_maxCapacity - 1, _list.Count - _maxCapacity);
+                {
+                    if (_onDispose != null)
+                    {
+                        while (_list.Count > _maxCapacity)
+                        {
+                            _onDispose?.Invoke(_list[^1]);
+                            _list.RemoveAt(_list.Count - 1);
+                        }
+                    }
+                    else
+                        _list.RemoveRange(_maxCapacity, _list.Count - _maxCapacity);
+                }
             }
         }
 
@@ -56,13 +70,26 @@ namespace SimFS
 
         public void Return(T obj)
         {
+#if SIMFS_POOLING_DEBUG
+            if (_list.Contains(obj))
+                throw new System.InvalidOperationException("you're returing a same obj twice!");
+#endif
+            _onReturn?.Invoke(obj);
             if (_list.Count >= _maxCapacity)
             {
                 _onDispose?.Invoke(obj);
                 return;
             }
-            _onReturn?.Invoke(obj);
             _list.Add(obj);
+        }
+
+        public void Clear()
+        {
+            foreach (var item in _list)
+            {
+                _onDispose?.Invoke(item);
+            }
+            _list.Clear();
         }
     }
 }

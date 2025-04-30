@@ -36,8 +36,4 @@ public class HostFSTest : IFileSystemTest
             File.Delete(f);
         }
     }
-
-    public void Flush()
-    {
-    }
 }

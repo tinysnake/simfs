@@ -79,7 +79,6 @@ public class FileSystemTester
         {
             tester.AddFile(fileNames[i], _fileContents[i]);
         }
-        tester.Flush();
     }
 
 

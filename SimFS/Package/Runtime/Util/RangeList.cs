@@ -215,6 +215,12 @@ namespace SimFS
             _ranges.Clear();
         }
 
+        public void TrimExcess(int capacity)
+        {
+            if (_ranges.Capacity > capacity)
+                _ranges.Capacity = capacity;
+        }
+
         public List<SimpleRange>.Enumerator GetEnumerator() => _ranges.GetEnumerator();
 
         IEnumerator<SimpleRange> IEnumerable<SimpleRange>.GetEnumerator() => GetEnumerator();

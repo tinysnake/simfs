@@ -5,6 +5,4 @@ public interface IFileSystemTest
     void RenameFile(string from, string to);
     int ReadFile(string path, byte[] buffer);
     void DeleteAll(string basePath);
-
-    void Flush();
 }
