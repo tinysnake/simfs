@@ -96,14 +96,14 @@ namespace SimFS
 
         internal Transaction BeginTransaction(TransactionMode mode, string friendlyName)
         {
+            Transaction t;
             if (Pooling.TransactionPool.HasItem)
-            {
-                var t = Pooling.TransactionPool.Get();
-                t.ReInitialize(this, mode, friendlyName);
-                _allocatedTransactions.Add(t);
-                return t;
-            }
-            return new Transaction(this, mode, friendlyName);
+                t = Pooling.TransactionPool.Get();
+            else
+                t = new Transaction();
+            t.ReInitialize(this, mode, friendlyName);
+            _allocatedTransactions.Add(t);
+            return t;
         }
 
         internal void EndTransaction(Transaction t)

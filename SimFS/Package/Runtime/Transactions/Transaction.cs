@@ -82,9 +82,8 @@ namespace SimFS
             return result;
         }
 
-        internal Transaction(FSMan fsMan, TransactionMode mode, string name)
+        internal Transaction()
         {
-            ReInitialize(fsMan, mode, name);
         }
 
         internal void ReInitialize(FSMan fsMan, TransactionMode mode, string name)
