@@ -289,12 +289,11 @@ namespace SimFS
 
         public void Backup(Stream stream, Span<byte> buffer)
         {
-            if(_allocatedTransactions.Count>0)
-                throw new SimFSException(ExceptionType.UnsaveChangesMade, "Please commit all the transactions firsts.");
             if (stream == null || !stream.CanWrite)
                 throw new ArgumentException("stream is invalid");
+            BufferHolder<byte> bufferHolder = default;
             if (buffer.IsEmpty)
-                Pooling.RentBuffer(out buffer);
+                bufferHolder = Pooling.RentBuffer(out buffer);
             _fs.Position = 0;
             var read = 0;
             do
@@ -304,6 +303,8 @@ namespace SimFS
                     stream.Write(buffer[..read]);
             }
             while (read > 0);
+            if (bufferHolder.IsValid)
+                bufferHolder.Dispose();
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

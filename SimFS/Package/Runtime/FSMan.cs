@@ -33,8 +33,6 @@ namespace SimFS
         private readonly List<BlockGroupHead> _cachedBlockGroupHeads;
         private int _cachedBlockGroupFirstIndex;
         private readonly HashSet<Transaction> _allocatedTransactions;
-        //private readonly Dictionary<int, SimFileStream> _openedWriteFiles;
-        //private readonly Dictionary<int, int> _openedReadFiles;
         private readonly Dictionary<int, FileSharingData> _fileSharingDataDict;
 
         internal int loadedDirectories = 0;
@@ -50,8 +48,6 @@ namespace SimFS
             _loadedBlockGroups = new Dictionary<int, BlockGroup>();
             _cachedBlockGroupHeads = new List<BlockGroupHead>();
             _allocatedTransactions = new HashSet<Transaction>();
-            //_openedWriteFiles = new Dictionary<int, SimFileStream>();
-            //_openedReadFiles = new Dictionary<int, int>();
             _fileSharingDataDict = new Dictionary<int, FileSharingData>();
             _smallBuffer = new byte[FSHeadData.RESERVED_SIZE];
             Customizer = customizer ?? new Customizer();
