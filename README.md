@@ -17,7 +17,7 @@ SimFS is a Single File Simulated File System written in C#.
 **Cautions:**
 1. SimFS is not threadsafe, you can access SimFS's APIs in **only 1** thread(It doesn't matter it's main thread or not).
 2. Do not read a file before it's done writing, otherwise exceptions will be thrown.
-3. At this version of SimFS, the changes of transactions will save in the memory before it commits/rollbacks, so mind the memory usage before you make a massive transaction.
+3. At this version of SimFS, the changes of transactions are saved in the memory before it commits/rollbacks, so mind the memory usage before you make a massive transaction.
 4. The file size is limited by the `BlockSize` argument of the Filebase, read the BlockSize section for more information.
 5. The number files in a directory is limited by the `BlockSize` too, if you want to save a huge amount of files into one folder, make sure you categorize it and divide them into sub folders to prevent "overflow".
 
