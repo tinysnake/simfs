@@ -328,7 +328,7 @@ namespace SimFS
                 }
             }
 
-            if (_blockGroupChanges != null)
+            if (_inodeChanges != null)
             {
                 foreach (var (bgId, dict) in _inodeChanges)
                 {
@@ -353,16 +353,22 @@ namespace SimFS
             _isCommiting = true;
             var tp = _fsMan.Pooling.TransactionPooling;
 
-            foreach (var (bgId, dict) in _inodeChanges)
+            if(_inodeChanges != null)
             {
-                var bg = _fsMan.GetBlockGroup(bgId);
-                bg.RevertInodeChanges(dict);
+                foreach (var (bgId, dict) in _inodeChanges)
+                {
+                    var bg = _fsMan.GetBlockGroup(bgId);
+                    bg.RevertInodeChanges(dict);
+                }
             }
 
-            foreach (var (bgId, meta) in _blockGroupChanges)
+            if(_blockGroupChanges != null)
             {
-                var bg = _fsMan.GetBlockGroup(bgId);
-                bg.RevertMetaChanges(meta.BlockBitmap.Span, meta.InodeBitmap.Span);
+                foreach (var (bgId, meta) in _blockGroupChanges)
+                {
+                    var bg = _fsMan.GetBlockGroup(bgId);
+                    bg.RevertMetaChanges(meta.BlockBitmap.Span, meta.InodeBitmap.Span);
+                }
             }
 
             var stack = tp.DirSaveStackPool.Get();
@@ -389,11 +395,14 @@ namespace SimFS
                 tp.DirSaveStackPool.Return(stack);
             }
 
-            var bs = _fsMan.Head.BlockSize;
-            foreach (var (inodeGlobalIndex, changes) in _fileChanges)
+            if(_fileChanges != null)
             {
-                var openedFile = _fsMan.GetLoadedFileStream(inodeGlobalIndex);
-                openedFile?.RevertChanges(changes);
+                var bs = _fsMan.Head.BlockSize;
+                foreach (var (inodeGlobalIndex, changes) in _fileChanges)
+                {
+                    var openedFile = _fsMan.GetLoadedFileStream(inodeGlobalIndex);
+                    openedFile?.RevertChanges(changes);
+                }
             }
 
             TruelyDispose();
