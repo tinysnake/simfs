@@ -31,9 +31,9 @@ namespace SimFS
         private readonly SimDirectory _rootDirectory;
         private readonly Dictionary<int, BlockGroup> _loadedBlockGroups;
         private readonly List<BlockGroupHead> _cachedBlockGroupHeads;
-        private int _cachedBlockGroupFirstIndex;
         private readonly HashSet<Transaction> _allocatedTransactions;
-        private readonly Dictionary<int, FileSharingData> _fileSharingDataDict;
+        private readonly Dictionary<int, SimFileStream> _opendedFiles;
+        private int _cachedBlockGroupFirstIndex;
 
         internal int loadedDirectories = 0;
 
@@ -48,7 +48,7 @@ namespace SimFS
             _loadedBlockGroups = new Dictionary<int, BlockGroup>();
             _cachedBlockGroupHeads = new List<BlockGroupHead>();
             _allocatedTransactions = new HashSet<Transaction>();
-            _fileSharingDataDict = new Dictionary<int, FileSharingData>();
+            _opendedFiles = new Dictionary<int, SimFileStream>();
             _smallBuffer = new byte[FSHeadData.RESERVED_SIZE];
             Customizer = customizer ?? new Customizer();
             Pooling = new Pooling(Customizer);
@@ -368,80 +368,47 @@ namespace SimFS
 
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal SimFileStream LoadFileStream(InodeInfo inode, FileAccess access, Transaction transaction, SimDirectory parentDir, BlockGroup bg = null)
-        {
-            if (access > FileAccess.Read)
-            {
-                if (transaction == null)
-                    throw new SimFSException(ExceptionType.MissingTransaction);
-            }
-            return DangerouslyLoadFileStream(inode, access, transaction, parentDir, bg);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal SimFileStream DangerouslyLoadFileStream(InodeInfo inode, FileAccess access, Transaction transaction, SimDirectory parentDir, BlockGroup bg = null)
+        internal SimFileStream LoadFileStream(InodeInfo inode, Transaction transaction, SimDirectory parentDir, BlockGroup bg = null)
         {
             var fs = Pooling.FileStreamPool.Get();
-            if (parentDir != null)
-                fs.LoadFileStream(this, inode, access, parentDir, bg);
-            else
-                fs.LoadFileStreamWithoutParent(this, inode, access, bg);
-            if (access == FileAccess.ReadWrite && transaction != null)
-                fs.WithTransaction(transaction);
+            try
+            {
+                TryOpenFile(inode.globalIndex, fs);
+                if (parentDir != null)
+                    fs.LoadFileStream(this, inode, parentDir, bg);
+                else
+                    fs.LoadFileStreamWithoutParent(this, inode, bg);
+                if (transaction != null)
+                    fs.WithTransaction(transaction);
+            }
+            catch
+            {
+                Pooling.FileStreamPool.Return(fs);
+                throw;
+            }
             return fs;
         }
 
-        internal FileSharingData TryOpenFile(int inodeGlobalIndex, SimFileStream file, FileAccess access)
+        private void TryOpenFile(int inodeGlobalIndex, SimFileStream file)
+        {
+            if (_opendedFiles.ContainsKey(inodeGlobalIndex))
+                throw new SimFSException(ExceptionType.FileAlreadyOpened);
+            _opendedFiles[inodeGlobalIndex] = file;
+        }
+
+        internal void CloseFile(int inodeGlobalIndex, SimFileStream file)
         {
             if (!file.IsValid || file.InodeInfo.globalIndex != inodeGlobalIndex)
                 throw new SimFSException(ExceptionType.InvalidFileStream);
-            if (!_fileSharingDataDict.TryGetValue(inodeGlobalIndex, out var sd))
-            {
-                sd = Pooling.FileSharingDataPool.Get();
-                sd.Initialize(inodeGlobalIndex);
-                _fileSharingDataDict[inodeGlobalIndex] = sd;
-            }
-
-            if (access == FileAccess.Read)
-            {
-                sd.ReadAccessCount++;
-            }
-            else
-            {
-                sd.EnterWriteState(file);
-            }
-            return sd;
+            _opendedFiles.Remove(inodeGlobalIndex);
         }
 
-        internal void CloseFile(int inodeGlobalIndex, SimFileStream file, FileAccess access)
-        {
-            if (!file.IsValid || file.InodeInfo.globalIndex != inodeGlobalIndex)
-                throw new SimFSException(ExceptionType.InvalidFileStream);
-            if (!_fileSharingDataDict.TryGetValue(inodeGlobalIndex, out var sd))
-                throw new SimFSException(ExceptionType.InvalidFileStream, $"all permissions related to the file: {inodeGlobalIndex} are already released.");
-            if (access == FileAccess.Read)
-            {
-                sd.ReadAccessCount--;
-            }
-            else
-            {
-                sd.ExitWriteState(file);
-            }
-
-            if (sd.IsEmpty)
-            {
-                _fileSharingDataDict.Remove(inodeGlobalIndex);
-                Pooling.FileSharingDataPool.Return(sd);
-            }
-        }
-
-        internal bool IsFileOpen(int inodeGlobalIndex) => _fileSharingDataDict.TryGetValue(inodeGlobalIndex, out var sd) &&
-            (sd.ReadAccessCount > 0 || sd.WriteAccessInstance != null);
+        internal bool IsFileOpen(int inodeGlobalIndex) => _opendedFiles.ContainsKey(inodeGlobalIndex);
 
         internal SimFileStream GetLoadedFileStream(int inodeGlobalIndex)
         {
-            if (_fileSharingDataDict.TryGetValue(inodeGlobalIndex, out var sd))
-                return sd.WriteAccessInstance;
+            if (_opendedFiles.TryGetValue(inodeGlobalIndex, out var fs))
+                return fs;
             return null;
         }
 
@@ -459,7 +426,9 @@ namespace SimFS
             }
 
             if (_allocatedTransactions.Count > 0)
+            {
                 throw new SimFSException(ExceptionType.UnsaveChangesMade);
+            }
 
             _loadedBlockGroups.Clear();
             DisposeIO();

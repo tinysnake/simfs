@@ -16,15 +16,26 @@ namespace SimFS
     public class SimFileStream : Stream
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static int GetMaxFileSize(int blockPointersCount, int blockSize)
+        internal static int GetMaxFileSize(int blockPointersCount, int blockSize)
         {
             return GetMaxBlocksCanAllocate(blockPointersCount) * blockSize;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static int GetMaxBlocksCanAllocate(int blockPointersCount)
+        internal static int GetMaxBlocksCanAllocate(int blockPointersCount)
         {
             return blockPointersCount * byte.MaxValue;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static int GetBlocksAllocated(BlockPointerData[] pointers)
+        {
+            var i = 0;
+            foreach(var p in pointers)
+            {
+                i += p.blockCount;
+            }
+            return i;
         }
 
         internal SimFileStream()
@@ -34,25 +45,24 @@ namespace SimFS
 
         ~SimFileStream()
         {
-            _fsMan?.CloseFile(_inodeGlobalIndex, this, _fileAccess);
+            _fsMan?.CloseFile(_inodeGlobalIndex, this);
         }
 
-        internal void LoadFileStreamWithoutParent(FSMan fsMan, InodeInfo inodeInfo, FileAccess access, BlockGroup bg = null)
+        internal void LoadFileStreamWithoutParent(FSMan fsMan, InodeInfo inodeInfo, BlockGroup bg = null)
         {
-            LoadFileStreamInternal(fsMan, inodeInfo, access, null, bg);
+            LoadFileStreamInternal(fsMan, inodeInfo, null, bg);
         }
 
-        internal void LoadFileStream(FSMan fsMan, InodeInfo inodeInfo, FileAccess access, SimDirectory parentDir, BlockGroup bg = null)
+        internal void LoadFileStream(FSMan fsMan, InodeInfo inodeInfo, SimDirectory parentDir, BlockGroup bg = null)
         {
             if (parentDir == null || !parentDir.IsValid)
                 throw new SimFSException(ExceptionType.InvalidDirectory);
-            LoadFileStreamInternal(fsMan, inodeInfo, access, parentDir, bg);
+            LoadFileStreamInternal(fsMan, inodeInfo, parentDir, bg);
         }
 
-        private void LoadFileStreamInternal(FSMan fsMan, InodeInfo inodeInfo, FileAccess access, SimDirectory parentDir, BlockGroup bg = null)
+        private void LoadFileStreamInternal(FSMan fsMan, InodeInfo inodeInfo, SimDirectory parentDir, BlockGroup bg = null)
         {
             inodeInfo.ThrowsIfNotValid();
-            _fileAccess = access;
             var (inodeGlobalIndex, inodeData) = inodeInfo;
             _fsMan = fsMan ?? throw new ArgumentNullException(nameof(fsMan));
             _blockSize = fsMan.Head.BlockSize;
@@ -78,12 +88,10 @@ namespace SimFS
             }
             _localBlockIndex = 0;
             _localByteIndex = 0;
-            _sharingData = _fsMan.TryOpenFile(_inodeGlobalIndex, this, _fileAccess);
         }
 
         internal void InPool()
         {
-            _fileAccess = FileAccess.Read;
             _transaction = null;
             _blockSize = 0;
             _fsMan = null;
@@ -106,7 +114,6 @@ namespace SimFS
         }
 
 
-        private FileAccess _fileAccess;
         private SimDirectoryInfo _parentDir;
         private int _length;
         private BlockPointerData[] _blockPointers;
@@ -118,10 +125,9 @@ namespace SimFS
         private int _localBlockIndex;
         private int _localByteIndex;
         private Transaction _transaction;
-        private FileSharingData _sharingData;
         private bool _isWritten;
 
-        public override bool CanWrite => _fileAccess > FileAccess.Read;
+        public override bool CanWrite => true;
         public override bool CanRead => true;
         public override bool CanSeek => true;
         public override long Length => _length;
@@ -137,16 +143,14 @@ namespace SimFS
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void ThrowsIfNotValidRead()
         {
-            if (_sharingData.WriteAccessInstance?._isWritten ?? false)
-                throw new SimFSException(ExceptionType.NoReadWhenContentChanges);
+            if (_isWritten)
+                throw new SimFSException(ExceptionType.UnsaveChangesMade);
             ThrowsIfNotValid();
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void ThrowsIfNotValidWrite()
         {
-            if (_fileAccess < FileAccess.ReadWrite)
-                throw new SimFSException(ExceptionType.NoWriteAccessRight);
             if (_transaction == null)
                 throw new SimFSException(ExceptionType.MissingTransaction);
             ThrowsIfNotValid();
@@ -193,6 +197,11 @@ namespace SimFS
                 throw new ArgumentNullException(nameof(buffer));
             ThrowsIfNotValidRead();
 
+            return ReadRawData(buffer);
+        }
+
+        private int ReadRawData(Span<byte> buffer)
+        {
             var maxLengthCanRead = Math.Min(buffer.Length, _length - _localBlockIndex * _blockSize - _localByteIndex);
             var byteIndex = 0;
             while (byteIndex < maxLengthCanRead)
@@ -320,6 +329,7 @@ namespace SimFS
 
             _inodeBg.UpdateInode(transaction, InodeInfo);
             _transaction = lastTransaction;
+            _isWritten = false;
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             static int GetMaxLength(SortedList<WriteOperation> ops)
@@ -332,17 +342,6 @@ namespace SimFS
                         max = num;
                 }
                 return max;
-            }
-
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            static int GetBlocksAllocated(BlockPointerData[] bpds)
-            {
-                var sum = 0;
-                foreach (var bpd in bpds)
-                {
-                    sum += bpd.blockCount;
-                }
-                return sum;
             }
         }
 
@@ -603,6 +602,7 @@ namespace SimFS
                 var index = 0;
                 var writeBi = _localBlockIndex;
                 var writeBo = _localByteIndex;
+                totalLength = Math.Min(GetBlocksAllocated(_blockPointers) * _blockSize, totalLength);
                 totalLength = Math.Min((int)Length - (int)Position, totalLength);
                 if (totalLength > 0)
                 {
@@ -611,7 +611,7 @@ namespace SimFS
                     {
                         var size = Math.Min(bufferSize, totalLength - index);
                         var buffer = _fsMan.Pooling.RentBuffer(out var span, size, true);
-                        var read = Read(span);
+                        var read = ReadRawData(span);
                         if (read != span.Length)
                             throw new SimFSException(ExceptionType.InconsistantDataValue, $"content size read: {read} is not match the requested length: {span.Length}");
                         defragRelocations.Add(new WriteOperation(writeBi * _blockSize + writeBo, buffer));
@@ -651,9 +651,7 @@ namespace SimFS
                 _transaction.Dispose();
             }
             _transaction = null;
-            if (_fileAccess == FileAccess.ReadWrite)
-                _sharingData.ExitWriteState(this);
-            _fsMan.CloseFile(_inodeGlobalIndex, this, _fileAccess);
+            _fsMan.CloseFile(_inodeGlobalIndex, this);
             _fsMan.Pooling.FileStreamPool.Return(this);
         }
     }

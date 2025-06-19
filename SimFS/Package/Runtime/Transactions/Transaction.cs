@@ -304,7 +304,7 @@ namespace SimFS
                             if (!bg.InodeBitmap.Check(inodeIndex))
                                 continue;
                             var inode = bg.GetInode(inodeIndex);
-                            using var fs = _fsMan.DangerouslyLoadFileStream(inode, FileAccess.ReadWrite, this, null, bg);
+                            using var fs = _fsMan.LoadFileStream(inode, this, null, bg);
                             fs.SaveChanges(this, changes);
                         }
                         else

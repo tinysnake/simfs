@@ -253,8 +253,8 @@ namespace SimFS
                     SimDirectory.GetAllChildren(basePaths, fromDir.GetDirectory(fromName), list, SimFSType.File);
                     foreach (var relFilePath in list)
                     {
-                        using var fromFile = OpenFile(et, fromDir, relFilePath.Span, OpenFileMode.Open, FileAccess.Read, 0, throws);
-                        using var toFile = OpenFile(et, targetDir, relFilePath.Span, OpenFileMode.OpenOrCreate, FileAccess.ReadWrite, 0, throws);
+                        using var fromFile = OpenFile(et, fromDir, relFilePath.Span, OpenFileMode.Open, 0, throws);
+                        using var toFile = OpenFile(et, targetDir, relFilePath.Span, OpenFileMode.OpenOrCreate, 0, throws);
                         fromFile.CopyTo(toFile);
                     }
                 }
@@ -266,8 +266,8 @@ namespace SimFS
                             throw new SimFSException(ExceptionType.FileAlreadyExists, targetPath.ToString());
                         return;
                     }
-                    using var fromFile = OpenFile(et, fromDir, fromName, OpenFileMode.Open, FileAccess.Read, 0, throws);
-                    using var toFile = OpenFile(et, toDir, toName, OpenFileMode.OpenOrCreate, FileAccess.ReadWrite, 0, throws);
+                    using var fromFile = OpenFile(et, fromDir, fromName, OpenFileMode.Open, 0, throws);
+                    using var toFile = OpenFile(et, toDir, toName, OpenFileMode.OpenOrCreate, 0, throws);
                     fromFile.CopyTo(toFile);
                 }
                 success = true;
@@ -298,8 +298,8 @@ namespace SimFS
                         throw new SimFSException(ExceptionType.FileAlreadyExists, targetPath.ToString());
                     return;
                 }
-                using var fromFile = fromInfo.OpenRead(throws);
-                using var toFile = OpenFile(et, toDir, toName, OpenFileMode.OpenOrCreate, FileAccess.ReadWrite, 0, throws);
+                using var fromFile = fromInfo.Open(throws);
+                using var toFile = OpenFile(et, toDir, toName, OpenFileMode.OpenOrCreate, 0, throws);
                 fromFile.CopyTo(toFile);
                 success = true;
             }
@@ -337,8 +337,8 @@ namespace SimFS
                 SimDirectory.GetAllChildren(basePaths, fromDir, list, SimFSType.File);
                 foreach (var relFilePath in list)
                 {
-                    using var fromFile = OpenFile(et, fromDir, relFilePath.Span, OpenFileMode.Open, FileAccess.Read, 0, throws);
-                    using var toFile = OpenFile(et, targetDir, relFilePath.Span, OpenFileMode.OpenOrCreate, FileAccess.ReadWrite, 0, throws);
+                    using var fromFile = OpenFile(et, fromDir, relFilePath.Span, OpenFileMode.Open, 0, throws);
+                    using var toFile = OpenFile(et, targetDir, relFilePath.Span, OpenFileMode.OpenOrCreate, 0, throws);
                     fromFile.CopyTo(toFile);
                 }
                 success = true;
@@ -353,19 +353,17 @@ namespace SimFS
         {
             CheckPath(ref path);
             var createIfNoExists = mode > OpenFileMode.Open;
-            var access = createIfNoExists ? FileAccess.ReadWrite : FileAccess.Read;
             var et = createIfNoExists ? EnsureTransaction(transaction, TransactionMode.Temproary) : default;
             var dir = GetParentDirectory(et, path, out var fileName, createIfNoExists) ?? throw new SimFSException(ExceptionType.DirectoryNotFound, path.ToString());
-            return OpenFile(et, dir, fileName, mode, access, fileSize, throwsIfNotExists);
+            return OpenFile(et, dir, fileName, mode, fileSize, throwsIfNotExists);
         }
 
         public SimFileStream OpenFile(SimDirectoryInfo parentDir, ReadOnlySpan<char> fileName, OpenFileMode mode, Transaction transaction = null, int fileSize = -1, bool throwsIfNotExists = true)
         {
             var dir = parentDir.GetDirectory(throwsIfNotExists);
             var createIfNoExists = mode > OpenFileMode.Open;
-            var access = createIfNoExists ? FileAccess.ReadWrite : FileAccess.Read;
             var et = createIfNoExists ? EnsureTransaction(transaction, TransactionMode.Temproary) : default;
-            return OpenFile(et, dir, fileName, mode, access, fileSize, throwsIfNotExists);
+            return OpenFile(et, dir, fileName, mode, fileSize, throwsIfNotExists);
         }
 
         public SimFileStream OpenFile(ReadOnlySpan<char> basePath, ReadOnlySpan<char> path, OpenFileMode mode, Transaction transaction = null, int fileSize = -1, bool throwsIfNotExists = true)
@@ -373,15 +371,14 @@ namespace SimFS
             CheckPath(ref basePath);
             CheckPath(ref path);
             var createIfNoExists = mode > OpenFileMode.Open;
-            var access = createIfNoExists ? FileAccess.ReadWrite : FileAccess.Read;
             var et = createIfNoExists ? EnsureTransaction(transaction, TransactionMode.Temproary) : default;
             var dir = GetDirectory(et, basePath, createIfNoExists) ?? throw new SimFSException(ExceptionType.DirectoryNotFound, path.ToString());
             dir = GetParentDirectoryRelatively(et, dir, path, out var fileName, out var _, createIfNoExists) ?? throw new SimFSException(ExceptionType.DirectoryNotFound, path.ToString());
-            return OpenFile(et, dir, fileName, mode, access, fileSize, throwsIfNotExists);
+            return OpenFile(et, dir, fileName, mode, fileSize, throwsIfNotExists);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private SimFileStream OpenFile(Transaction transaction, SimDirectory dir, ReadOnlySpan<char> fileName, OpenFileMode mode, FileAccess access, int fileSize, bool throwsIfNotExists)
+        private SimFileStream OpenFile(Transaction transaction, SimDirectory dir, ReadOnlySpan<char> fileName, OpenFileMode mode, int fileSize, bool throwsIfNotExists)
         {
             SimFileStream fs;
             if (mode > OpenFileMode.Open)
@@ -389,11 +386,11 @@ namespace SimFS
                 var blockCount = 1;
                 if (fileSize > 0)
                     blockCount = SimUtil.Number.NextMultipleOf(fileSize, _fsMan.Head.BlockSize) / _fsMan.Head.BlockSize;
-                fs = dir.GetOrCreateFile(transaction, fileName, access, blockCount);
+                fs = dir.GetOrCreateFile(transaction, fileName, blockCount);
             }
             else
             {
-                if (!dir.TryGetFile(null, fileName, access, out fs))
+                if (!dir.TryGetFile(null, fileName, out fs))
                 {
                     if (throwsIfNotExists)
                         throw new SimFSException(ExceptionType.FileNotFound, fileName.ToString());

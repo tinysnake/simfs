@@ -45,7 +45,7 @@ namespace SimFS
 
         internal SimDirectory ParentDirectory => _dirInfo.GetDirectory(false);
 
-        public SimFileStream OpenRead(bool throwsIfInvalid = false)
+        public SimFileStream Open(bool throwsIfInvalid = false)
         {
             if (!Exists)
             {
@@ -53,18 +53,7 @@ namespace SimFS
                     throw new SimFSException(ExceptionType.FileNotFound, _fileName.ToString());
                 return null;
             }
-            return _fsMan.LoadFileStream(new InodeInfo(_inodeGlobalIndex, _inode), FileAccess.Read, null, _dirInfo.GetDirectory(throwsIfInvalid));
-        }
-
-        public SimFileStream OpenWrite(Transaction transaction, bool throwsIfInvalid = false)
-        {
-            if (!Exists)
-            {
-                if (throwsIfInvalid)
-                    throw new SimFSException(ExceptionType.FileNotFound, _fileName.ToString());
-                return null;
-            }
-            return _fsMan.LoadFileStream(new InodeInfo(_inodeGlobalIndex, _inode), FileAccess.ReadWrite, transaction, _dirInfo.GetDirectory(throwsIfInvalid));
+            return _fsMan.LoadFileStream(new InodeInfo(_inodeGlobalIndex, _inode), null, _dirInfo.GetDirectory(throwsIfInvalid));
         }
     }
 }

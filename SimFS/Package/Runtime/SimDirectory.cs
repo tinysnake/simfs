@@ -186,10 +186,10 @@ namespace SimFS
             Parent = parent;
             Name = name;
             (_inodeGlobalIndex, _inode) = inode;
-            _stream = _fsMan.Pooling.FileStreamPool.Get();
+            //_stream = _fsMan.Pooling.FileStreamPool.Get();
             //if (parent != null)
             //SimLog.Log($"creating dir: {parent.BuildFullName(name.Span)}, inode: {inode.globalIndex}");
-            _stream = _fsMan.DangerouslyLoadFileStream(inode, FileAccess.ReadWrite, null, this, bg);
+            _stream = _fsMan.LoadFileStream(inode, null, this, bg);
             _fsMan.loadedDirectories++;
             if (_fsMan.loadedDirectories > _fsMan.Customizer.MaxCachedDirectoires)
                 TrimLoadedDirectories(_fsMan, this);
@@ -219,7 +219,7 @@ namespace SimFS
         public ReadOnlyMemory<char> Name { get; private set; }
         public SimDirectory Parent { get; private set; }
 
-        public bool IsValid => _stream != null;
+        public bool IsValid => _inodeGlobalIndex >= 0;
 
         public KeyEnumerable Files
         {
@@ -334,7 +334,7 @@ namespace SimFS
             return TryGetEntry(tempName, isDir: false, out _);
         }
 
-        public SimFileStream GetFile(Transaction transaction, ReadOnlySpan<char> fileName, FileAccess access)
+        public SimFileStream GetFile(Transaction transaction, ReadOnlySpan<char> fileName)
         {
             ThrowsIfNotValid();
             ThrowsIfNameIsInvalid(fileName);
@@ -342,10 +342,10 @@ namespace SimFS
             using var _ = TempName(fileName, out var tempName);
             var dataEntry = ThrowIfEntryNotFound(tempName, isDir: false);
             var inode = _fsMan.GetInode(dataEntry.inodeGlobalIndex, out var bg);
-            return _fsMan.LoadFileStream(inode, access, transaction, this, bg);
+            return _fsMan.LoadFileStream(inode, transaction, this, bg);
         }
 
-        public SimFileStream CreateFile(Transaction transaction, ReadOnlySpan<char> fileName, FileAccess access, int blockCount = -1)
+        public SimFileStream CreateFile(Transaction transaction, ReadOnlySpan<char> fileName, int blockCount = -1)
         {
             ThrowsIfNotValid();
             if (blockCount <= 0)
@@ -357,10 +357,10 @@ namespace SimFS
 
             var childInode = _fsMan.AllocateInodeNear(transaction, _inodeGlobalIndex, InodeUsage.NormalFile, out var bg, blockCount);
             AddEntry(transaction, tempName.ToString(), childInode);
-            return _fsMan.LoadFileStream(childInode, access, transaction, this, bg);
+            return _fsMan.LoadFileStream(childInode, transaction, this, bg);
         }
 
-        public SimFileStream GetOrCreateFile(Transaction transaction, ReadOnlySpan<char> fileName, FileAccess access, int blockCount = -1)
+        public SimFileStream GetOrCreateFile(Transaction transaction, ReadOnlySpan<char> fileName, int blockCount = -1)
         {
             if (blockCount <= 0)
                 blockCount = 1;
@@ -372,14 +372,14 @@ namespace SimFS
             {
                 var childInode = _fsMan.AllocateInodeNear(transaction, _inodeGlobalIndex, InodeUsage.NormalFile, out var bg1, blockCount);
                 AddEntry(transaction, tempName.ToString(), childInode);
-                return _fsMan.LoadFileStream(childInode, access, transaction, this, bg1);
+                return _fsMan.LoadFileStream(childInode, transaction, this, bg1);
             }
 
             var inode = _fsMan.GetInode(entry.inodeGlobalIndex, out var bg);
-            return _fsMan.LoadFileStream(inode, access, transaction, this, bg);
+            return _fsMan.LoadFileStream(inode, transaction, this, bg);
         }
 
-        public bool TryGetFile(Transaction transaction, ReadOnlySpan<char> fileName, FileAccess access, out SimFileStream fileStream)
+        public bool TryGetFile(Transaction transaction, ReadOnlySpan<char> fileName, out SimFileStream fileStream)
         {
             ThrowsIfNotValid();
             ThrowsIfNameIsInvalid(fileName);
@@ -389,7 +389,7 @@ namespace SimFS
             if (!TryGetEntry(tempName, isDir: false, out var entry))
                 return false;
             var inode = _fsMan.GetInode(entry.inodeGlobalIndex, out var bg);
-            fileStream = _fsMan.LoadFileStream(inode, access, transaction, this, bg);
+            fileStream = _fsMan.LoadFileStream(inode, transaction, this, bg);
             return true;
         }
 
@@ -974,7 +974,7 @@ namespace SimFS
             {
                 var inodeInfo = _fsMan.GetInode(_inodeGlobalIndex, out var bg);
                 _inode = inodeInfo.data;
-                _stream = _fsMan.DangerouslyLoadFileStream(inodeInfo, FileAccess.ReadWrite, null, this, bg);
+                _stream = _fsMan.LoadFileStream(inodeInfo, null, this, bg);
                 _deleted = false;
             }
 
@@ -1095,43 +1095,49 @@ namespace SimFS
                 BitConverter.TryWriteBytes(entryCountSpan, _entries.Count);
                 _stream.Position = 0;
                 _stream.WithTransaction(transaction);
-                _stream.Write(entryCountSpan);
-
-                var pos = 4;
-                var curIndex = 0;
-                using (var bufferHolder = _fsMan.Pooling.RentBuffer(out var buffer, 256))
+                try
                 {
-                    foreach (var (start, length) in dirtyEntries)
+                    _stream.Write(entryCountSpan);
+
+                    var pos = 4;
+                    var curIndex = 0;
+                    using (var bufferHolder = _fsMan.Pooling.RentBuffer(out var buffer, 256))
                     {
-                        while (curIndex < start)
+                        foreach (var (start, length) in dirtyEntries)
                         {
-                            pos += _entries[curIndex].entryLength;
-                            curIndex++;
-                        }
-                        for (; curIndex < start + length; curIndex++)
-                        {
-                            var entry = _entries[curIndex];
-                            var name = _names[curIndex];
-                            DirectoryEntryData.WriteToBuffer(buffer, entry, name);
-                            _stream.Position = pos;
-                            _stream.Write(buffer[..entry.entryLength]);
-
-                            //if (entry.usage == InodeUsage.Directory)
-                            //{
-                            //    SimLog.Log($"applying dir: {name}");
-                            //}
-
-                            if (entry.usage == InodeUsage.Unused && _loadedDirectories.TryGetValue(curIndex, out var subDir))
+                            while (curIndex < start)
                             {
-                                subDir.Dispose();
-                                _loadedDirectories.Remove(curIndex);
+                                pos += _entries[curIndex].entryLength;
+                                curIndex++;
                             }
+                            for (; curIndex < start + length; curIndex++)
+                            {
+                                var entry = _entries[curIndex];
+                                var name = _names[curIndex];
+                                DirectoryEntryData.WriteToBuffer(buffer, entry, name);
+                                _stream.Position = pos;
+                                _stream.Write(buffer[..entry.entryLength]);
 
-                            pos += entry.entryLength;
+                                //if (entry.usage == InodeUsage.Directory)
+                                //{
+                                //    SimLog.Log($"applying dir: {name}");
+                                //}
+
+                                if (entry.usage == InodeUsage.Unused && _loadedDirectories.TryGetValue(curIndex, out var subDir))
+                                {
+                                    subDir.Dispose();
+                                    _loadedDirectories.Remove(curIndex);
+                                }
+
+                                pos += entry.entryLength;
+                            }
                         }
                     }
                 }
-                _stream.ClearTransaction();
+                finally
+                {
+                    _stream.ClearTransaction();
+                }
             }
             DisposeTransactionData(transaction.ID);
         }

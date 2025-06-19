@@ -19,7 +19,6 @@ namespace SimFS
             IntListPool = new CrudeObjectPool<List<int>>(() => new List<int>(), onReturn: x => x.Clear(), maxCapacity: BlockSize * 8);
             BlockGroupPool = new CrudeObjectPool<BlockGroup>(() => new BlockGroup(), onReturn: x => x.InPool(), maxCapacity: MIN_CACHE_BLOCK_SIZE);
             FileStreamPool = new CrudeObjectPool<SimFileStream>(() => new SimFileStream(), onReturn: x => x.InPool(), maxCapacity: MIN_CACHE_FILE_SIZE);
-            FileSharingDataPool = new CrudeObjectPool<FileSharingData>(()=> new FileSharingData(), onReturn: x=> x.InPool(), maxCapacity: MIN_CACHE_FILE_SIZE);
             DirectoryPool = new CrudeObjectPool<SimDirectory>(() => new SimDirectory(), onReturn: x => x.InPool(), maxCapacity: MIN_CACHE_FILE_SIZE);
             BlockPointersPool = new CrudeObjectPool<BlockPointerData[]>(() => new BlockPointerData[BlockPointersCount], onReturn: InodeData.OnBlockPointerInPool, maxCapacity: BlockSize * FSHeadData.GetPointersSize((uint)BlockSize));
             AttributesPool = new CrudeObjectPool<byte[]>(() => new byte[AttributeSize], onReturn: InodeData.OnAttributesInPool, maxCapacity: BlockSize * 8);
@@ -52,7 +51,6 @@ namespace SimFS
         internal IObjectPool<List<int>> IntListPool { get; private set; }
         internal IObjectPool<BlockGroup> BlockGroupPool { get; private set; }
         internal IObjectPool<SimFileStream> FileStreamPool { get; private set; }
-        internal IObjectPool<FileSharingData> FileSharingDataPool { get; private set; }
         internal IObjectPool<SimDirectory> DirectoryPool { get; private set; }
         internal IObjectPool<BlockPointerData[]> BlockPointersPool { get; private set; }
         internal IObjectPool<byte[]> AttributesPool { get; private set; }
