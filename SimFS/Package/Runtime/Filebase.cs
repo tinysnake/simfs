@@ -691,6 +691,11 @@ namespace SimFS
             _fsMan.Backup(stream, buffer);
         }
 
+        public void Flush()
+        {
+            _fsMan.Flush();
+        }
+
         public void Dispose()
         {
             _fsMan.Dispose();

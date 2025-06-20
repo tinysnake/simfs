@@ -307,6 +307,11 @@ namespace SimFS
                 bufferHolder.Dispose();
         }
 
+        public void Flush()
+        {
+            _fs.Flush();
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void DisposeIO()
         {
